@@ -100,21 +100,24 @@ def get_folder_size(path: str) -> int:
     return total_size
 
 
+def get_file_type(path: Union[str, Path]) -> CARTA.FileType:
+    extension = os.path.splitext(path)[1].lower()
+    if extension in ['.fits', '.fit', '.fts']:
+        return CARTA.FileType.FITS
+    elif extension in ['.hdf5', '.h5']:
+        return CARTA.FileType.HDF5
+    elif extension in ['.zarr']:
+        return CARTA.FileType.CASA
+    else:
+        return CARTA.FileType.UNKNOWN
+
+
 def get_file_info(path: Union[str, Path]) -> CARTA.FileInfo:
     file_info = CARTA.FileInfo()
     file_info.name = os.path.basename(path)
 
-    # Determine file type
-    extension = os.path.splitext(path)[1].lower()
-
-    if extension in ['.fits', '.fit', '.fts']:
-        file_info.type = CARTA.FileType.FITS
-    elif extension in ['.hdf5', '.h5']:
-        file_info.type = CARTA.FileType.HDF5
-    elif extension in ['.zarr']:
-        file_info.type = CARTA.FileType.CASA
-    else:
-        file_info.type = CARTA.FileType.UNKNOWN
+    file_type = get_file_type(path)
+    file_info.type = file_type
 
     try:
         if os.path.isdir(path):
