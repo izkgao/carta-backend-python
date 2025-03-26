@@ -1,0 +1,529 @@
+import os
+import platform
+import socket
+import subprocess
+from pathlib import Path
+from typing import Union
+
+import numpy as np
+from astropy.coordinates import SkyCoord
+from astropy.wcs import WCS
+from numba import njit
+
+from carta_backend import proto as CARTA
+
+
+def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """
+    Check if a specific port on the given host is available for binding.
+
+    This function attempts to create a socket and bind it to the specified
+    host and port. If the binding is successful, the port is considered
+    available; otherwise, it's in use.
+
+    Parameters
+    ----------
+    port : int
+        The port number to check for availability.
+    host : str, optional
+        The host address to bind to. Default is "127.0.0.1".
+
+    Returns
+    -------
+    bool
+        True if the port is available, False if it's already in use or
+        cannot be bound.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def get_release_info():
+    system = platform.system()
+
+    if system == "Darwin":  # macOS
+        result = subprocess.run(["sw_vers"], capture_output=True, text=True)
+        return result.stdout
+
+    elif system == "Linux":  # Linux distributions
+        if os.path.exists("/etc/os-release"):
+            with open("/etc/os-release", "r") as f:
+                return f.read()
+        else:
+            # Fallback: Try lsb_release
+            result = subprocess.run(["lsb_release", "-a"],
+                                    capture_output=True, text=True)
+            return (
+                result.stdout
+                if result.returncode == 0
+                else "Platform information not available"
+            )
+
+    elif system == "Windows":  # Windows
+        result = subprocess.run(
+            ["wmic", "os", "get", "Caption,Version,BuildNumber"],
+            capture_output=True, text=True)
+        return (
+            result.stdout
+            if result.returncode == 0
+            else "Platform information not available")
+
+    return "Platform information not available"
+
+
+def get_system_info():
+    system_info = {
+        "platform": platform.system(),
+        "architecture": platform.machine(),
+        "deployment": "Unknown",
+    }
+
+    try:
+        system_info["release_info"] = get_release_info()
+    except Exception:
+        system_info["release_info"] = "Command not available"
+
+    return system_info
+
+
+def get_folder_size(path: str) -> int:
+    total_size = 0
+    for dirpath, _, filenames in os.walk(path):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            total_size += os.path.getsize(fp)
+    return total_size
+
+
+def get_file_info(path: Union[str, Path]) -> CARTA.FileInfo:
+    file_info = CARTA.FileInfo()
+    file_info.name = os.path.basename(path)
+
+    # Determine file type
+    extension = os.path.splitext(path)[1].lower()
+
+    if extension in ['.fits', '.fit', '.fts']:
+        file_info.type = CARTA.FileType.FITS
+    elif extension in ['.hdf5', '.h5']:
+        file_info.type = CARTA.FileType.HDF5
+    elif extension in ['.zarr']:
+        file_info.type = CARTA.FileType.CASA
+    else:
+        file_info.type = CARTA.FileType.UNKNOWN
+
+    try:
+        if os.path.isdir(path):
+            file_info.size = get_folder_size(path)
+        else:
+            file_info.size = os.path.getsize(path)
+        file_info.HDU_list.append("")
+        file_info.date = int(os.path.getmtime(path))
+    except (PermissionError, OSError):
+        # Handle permission errors
+        file_info.type = CARTA.FileType.UNKNOWN
+        file_info.size = 0
+        file_info.HDU_list.append("")
+        file_info.date = 0
+
+    return file_info
+
+
+def get_directory_info(path: Union[str, Path]) -> CARTA.DirectoryInfo:
+    dir_info = CARTA.DirectoryInfo()
+    dir_info.name = os.path.basename(path)
+
+    try:
+        # Count items in subdirectory
+        dir_info.item_count = len(os.listdir(path))
+        # Get modification time
+        dir_info.date = int(os.path.getmtime(path))
+    except (PermissionError, OSError):
+        # Handle permission errors
+        dir_info.item_count = 0
+        dir_info.date = 0
+
+    return dir_info
+
+
+def get_header_entries(hdr):
+    header_entries = []
+
+    bool_map = {True: "T", False: "False"}
+
+    for card in hdr.cards:
+        h = CARTA.HeaderEntry()
+        h.name = card[0]
+        h.comment = card[2]
+        if isinstance(card[1], bool):
+            h.value = bool_map[card[1]]
+        elif isinstance(card[1], int):
+            h.value = str(card[1])
+            h.entry_type = CARTA.EntryType.INT
+            h.numeric_value = card[1]
+        elif isinstance(card[1], float):
+            h.value = str(card[1])
+            h.entry_type = CARTA.EntryType.FLOAT
+            h.numeric_value = card[1]
+        else:
+            h.value = str(card[1])
+
+        header_entries.append(h)
+
+    return header_entries
+
+
+def get_computed_entries(hdr, hdu_index, file_name):
+    computed_entries = []
+
+    h = CARTA.HeaderEntry()
+    h.name = "Name"
+    h.value = file_name
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "HDU"
+    h.value = str(hdu_index)
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Data type"
+    h.value = "float"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Shape"
+
+    values = []
+    for i in hdr.keys():
+        if i.startswith("NAXIS") and len(i) > 5:
+            values.append(hdr[i])
+
+    names = []
+    for i in hdr.keys():
+        if i.startswith("CTYPE") and len(i) > 5:
+            names.append(hdr[i].split("-")[0])
+
+    h.value = f"{str(values)} {str(names)}"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Number of channels"
+    h.entry_type = CARTA.EntryType.INT
+    h.numeric_value = hdr.get("NAXIS3", 1)
+    h.value = str(h.numeric_value)
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Number of polarizations"
+    h.entry_type = CARTA.EntryType.INT
+    h.numeric_value = hdr.get("NAXIS4", 0)
+    h.value = str(h.numeric_value)
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Coordinate type"
+    h.value = "Right Ascension, Declination"
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Projection"
+    h.value = "SIN"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Image reference pixels"
+    h.value = f"[{int(hdr['CRPIX1'])}, {int(hdr['CRPIX2'])}]"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Image reference coords"
+    coord = SkyCoord(ra=hdr["CRVAL1"], dec=hdr["CRVAL2"], unit="deg")
+    coords = coord.to_string("hmsdms", sep=":", precision=4).split()
+    h.value = f"[{coords[0]}, {coords[1]}]"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Image ref coords (deg)"
+    h.value = f"[{hdr['CRVAL1']:.4f} deg, {hdr['CRVAL2']:.4f} deg]"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Pixel increment"
+    h.value = f'{hdr["CDELT1"]*3600}\", {hdr["CDELT2"]*3600}\"'
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Pixel unit"
+    h.value = hdr['BUNIT']
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Celestial frame"
+    eq = hdr["EQUINOX"]
+    if isinstance(eq, str):
+        pass
+    elif eq < 2000:
+        eq = f"B{eq}"
+    else:
+        eq = f"J{eq}"
+    if "RADESYS" in hdr:
+        value = f"{hdr['RADESYS']}, {eq}"
+    else:
+        value = eq
+    h.value = value
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Spectral frame"
+    h.value = hdr.get("SPECSYS", "")
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Velocity definition"
+    h.value = "RADIO"
+    computed_entries.append(h)
+
+    h = CARTA.HeaderEntry()
+    h.name = "Restoring beam"
+
+    try:
+        bmaj = hdr["BMAJ"] * 3600
+        bmin = hdr["BMIN"] * 3600
+        bpa = hdr["BPA"]
+        value = f'{bmaj}\" X {bmin}\", {bpa} deg'
+    except KeyError:
+        value = ""
+
+    h.value = value
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "RA range"
+    h.value = ""
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "DEC range"
+    h.value = ""
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Frequency range"
+    h.value = ""
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Velocity range"
+    h.value = ""
+    computed_entries.append(h)
+
+    # Not implement yet
+    h = CARTA.HeaderEntry()
+    h.name = "Stokes coverage"
+    if "STOKES" in hdr["CTYPE4"].upper():
+        value = "[I]"
+    else:
+        value = ""
+    h.value = value
+    computed_entries.append(h)
+
+    return computed_entries
+
+
+def get_file_info_extended(hdr, hdu_index, file_name):
+    fex = CARTA.FileInfoExtended()
+    fex.dimensions = hdr['NAXIS']
+    fex.width = hdr['NAXIS1']
+    fex.height = hdr['NAXIS2']
+    fex.depth = hdr.get('NAXIS3', 1)
+    fex.stokes = hdr.get('NAXIS4', 0)
+    # fex.stokes_vals
+
+    header_entries = get_header_entries(hdr)
+    fex.header_entries.extend(header_entries)
+
+    computed_entries = get_computed_entries(hdr, hdu_index, file_name)
+    fex.computed_entries.extend(computed_entries)
+
+    # Not implemented yet
+    a = CARTA.AxesNumbers()
+    a.spatial_x = 1
+    a.spatial_y = 2
+    a.spectral = 3
+    a.stokes = 4
+    a.depth = 3
+    fex.axes_numbers.CopyFrom(a)
+
+    fex_dict = {str(hdu_index): fex}
+
+    return fex_dict
+
+
+def get_nan_encodings_block(arr):
+    # Based on https://gist.github.com/nvictus/66627b580c13068589957d6ab0919e66
+    arr = np.isnan(arr).ravel()
+    n = arr.size
+    rle = np.diff(np.r_[np.r_[0, np.flatnonzero(np.diff(arr)) + 1], n])
+    return rle.astype(np.uint32).tobytes()
+
+
+@njit
+def numba_histogram(data, bins, bin_min, bin_max):
+    hist = np.zeros(bins, dtype=np.int64)
+    bin_width = (bin_max - bin_min) / bins
+
+    for x in data:
+        if not np.isnan(x) and bin_min <= x < bin_max:
+            bin_idx = int((x - bin_min) / bin_width)
+            hist[bin_idx] += 1
+
+    return hist
+
+
+def encode_tile_coord(x, y, layer):
+    return (layer << 24) | (y << 12) | x
+
+
+def decode_tile_coord(encoded_coord):
+    # Extract x: Get the lowest 12 bits
+    x = encoded_coord & 0xFFF
+
+    # Extract y: Shift right by 12 bits and get the lowest 12 bits
+    y = (encoded_coord >> 12) & 0xFFF
+
+    # Extract layer: Shift right by 24 bits and get the lowest 8 bits
+    layer = (encoded_coord >> 24) & 0xFF
+
+    return x, y, layer
+
+
+def get_header_from_xradio(xarr):
+    wcs_dict = xarr["SKY"].direction_info
+
+    # Calculate dimensions except time
+    keys = list(xarr.sizes)
+    keys.pop(keys.index("time"))
+    naxis = len(keys)
+
+    # Get PC
+    pc = np.array(wcs_dict["pc"])
+    if (pc - np.identity(2)).sum() == 0:
+        pc = np.identity(naxis)
+    else:
+        # Not implemented
+        pc = np.identity(naxis)
+
+    # Get crpix
+    crpix = []
+    for axis in ["l", "m"]:
+        crpix.append(np.nonzero((xarr[axis] == 0).values)[0][0] + 1)
+    crpix.extend([1.0] * (naxis - 2))
+
+    # Get crval
+    crval = []
+    crval.append(np.rad2deg(wcs_dict["reference"]["data"][0]))
+    crval.append(np.rad2deg(wcs_dict["reference"]["data"][1]))
+    if "frequency" in keys:
+        crval.append(xarr["frequency"].attrs["crval"])
+    if "polarization" in keys:
+        crval.append(1.0)
+
+    # Get cdelt
+    cdelt = []
+    for axis in ["l", "m"]:
+        cdelt.append(np.rad2deg(xarr[axis][1] - xarr[axis][0]).values)
+    if "frequency" in keys:
+        values = xarr.frequency.values
+        cdelt.append(values[1] - values[0])
+    if "polarization" in keys:
+        cdelt.append(1.0)
+
+    # Get ctype
+    ctype = [f'RA---{wcs_dict["projection"]}',
+             f'DEC--{wcs_dict["projection"]}']
+    if "frequency" in keys:
+        ctype.append("FREQ")
+    if "polarization" in keys:
+        ctype.append("STOKES")
+
+    # Get shape
+    sizes = xarr.sizes
+    shape = [sizes["l"], sizes["m"]]
+    if "frequency" in keys:
+        shape.append(sizes["frequency"])
+    if "polarization" in keys:
+        shape.append(sizes["polarization"])
+
+    # Create WCS object
+    wcs = WCS(naxis=naxis)
+
+    # Set the reference pixel and coordinate
+    wcs.wcs.crval = crval
+    wcs.wcs.crpix = crpix
+    wcs.wcs.cdelt = cdelt
+    wcs.wcs.ctype = ctype
+    wcs.wcs.pc = pc
+
+    # Set additional parameters
+    wcs.wcs.lonpole = np.rad2deg(wcs_dict["lonpole"]["value"])
+    wcs.wcs.latpole = np.rad2deg(wcs_dict["latpole"]["value"])
+    wcs.pixel_shape = shape
+
+    # Get header
+    hdr = wcs.to_header()
+    hdr["NAXIS"] = hdr["WCSAXES"]
+    for i, v in enumerate(wcs.pixel_shape):
+        hdr[f"NAXIS{i+1}"] = v
+    hdr["BUNIT"] = xarr["SKY"].units[0]
+    sky_attrs = xarr["SKY"].direction_info["reference"]["attrs"]
+    freq_attrs = xarr["frequency"].reference_value["attrs"]
+    hdr["RADESYS"] = sky_attrs["frame"]
+    hdr["EQUINOX"] = sky_attrs["equinox"]
+    hdr["SPECSYS"] = freq_attrs["observer"].upper()
+    hdr["BMAJ"] = xarr["SKY"].user["bmaj"]
+    hdr["BMIN"] = xarr["SKY"].user["bmin"]
+    hdr["BPA"] = xarr["SKY"].user["bpa"]
+
+    return hdr
+
+
+def load_fits_data(hdul, hdu_index, channel, stokes):
+    ndim = hdul[hdu_index].data.ndim
+    if ndim == 2:
+        data = hdul[hdu_index].data
+    elif ndim == 3:
+        data = hdul[hdu_index].data[channel]
+    elif ndim == 4:
+        data = hdul[hdu_index].data[stokes][channel]
+    data = data.astype('<f4')
+    return data
+
+
+async def async_load_xradio_data(hdul, channel, stokes, time=0, client=None):
+    data = hdul['SKY'].isel(
+        frequency=channel, polarization=stokes, time=time)
+    if client is not None:
+        data = await client.compute(data)
+    data = data.values
+    return data
+
+
+def load_xradio_data(hdul, channel, stokes, time=0, client=None):
+    data = hdul['SKY'].isel(
+        frequency=channel, polarization=stokes, time=time)
+    # if client is not None:
+    #     data = client.compute(data)
+    data = data.values
+    return data

@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools >= 61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carta-backend-python"
+version = "0.0.1"
+description = "Carta backend in Python"
+readme = "README.md"
+requires-python = "==3.13.*"
+license = { file = "LICENSE" }
+
+authors = [
+    { name = "Zhen-Kai Gao", email = "zkgao@asiaa.sinica.edu.tw" },
+]
+
+maintainers = [
+    { name = "Zhen-Kai Gao", email = "zkgao@asiaa.sinica.edu.tw" },
+]
+
+dependencies = [
+    "loguru",
+    "dask[complete]",
+    "astropy",
+]
+
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+
+[project.urls]
+Repository = "https://github.com/izkgao/carta-backend-python"
+Issues = "https://github.com/izkgao/carta-backend-python/issues"
+Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
+
+[project.scripts]
+carta = "src.main:main"

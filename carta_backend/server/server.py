@@ -1,0 +1,269 @@
+import asyncio
+import os
+import webbrowser
+
+import uvicorn
+from starlette.applications import Starlette
+from starlette.responses import FileResponse
+from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.staticfiles import StaticFiles
+from starlette.websockets import WebSocket
+
+from carta_backend.log import logger
+from carta_backend.session import Session
+
+clog = logger.bind(name="CARTA")
+pflog = logger.bind(name="Performance")
+ptlog = logger.bind(name="Protocol")
+
+
+class Server:
+    """Server class for the Carta backend.
+
+    This class encapsulates the server functionality, including HTTP and
+    WebSocket endpoints, route creation, and server startup.
+
+    Attributes
+    ----------
+    session : Session
+        The session object for handling WebSocket messages
+    frontend_folder : str
+        Path to the folder containing the frontend files
+    host : str
+        Host address to bind the server to
+    port : int
+        Port to bind the server to
+    token : str, optional
+        Authentication token for securing WebSocket connections
+    """
+
+    def __init__(self, frontend_folder='.', host="0.0.0.0", port=3002,
+                 token=None, top_level_folder=None, starting_folder=None,
+                 dask_scheduler=None):
+        """Initialize the Server instance.
+
+        Parameters
+        ----------
+        frontend_folder : str, optional
+            Path to the folder containing the frontend files, by default '.'
+        host : str, optional
+            Host address to bind the server to, by default "0.0.0.0"
+        port : int, optional
+            Port to bind the server to, by default 3002
+        token : str, optional
+            Authentication token for securing WebSocket connections,
+            by default None
+        top_level_folder : str, optional
+            Top level folder for file operations, by default None
+        starting_folder : str, optional
+            Starting folder for file operations, by default None
+        dask_scheduler : str, optional
+            Dask scheduler address, by default None
+        """
+        self.frontend_folder = frontend_folder
+        self.host = host
+        self.port = port
+        self.token = token
+        self.top_level_folder = top_level_folder
+        self.starting_folder = starting_folder
+        self.dask_scheduler = dask_scheduler
+
+    async def http_endpoint(self, request):
+        """Serve the main HTML file.
+
+        Parameters
+        ----------
+        request : Request
+            The HTTP request object
+
+        Returns
+        -------
+        FileResponse
+            The HTTP response containing the HTML file
+        """
+        html_path = os.path.join(self.frontend_folder, "index.html")
+        return FileResponse(html_path)
+
+    async def websocket_endpoint(self, websocket: WebSocket):
+        """Handle WebSocket connections with optional token authentication.
+
+        Parameters
+        ----------
+        websocket : WebSocket
+            The WebSocket connection object
+
+        Returns
+        -------
+        None
+        """
+        # Check authentication if token is provided
+        if self.token:
+            # First check query parameters
+            client_token = websocket.query_params.get("token", None)
+            if not client_token:
+                # Check for token in headers
+                auth_header = websocket.headers.get("Authorization")
+                if auth_header and auth_header.startswith("Bearer "):
+                    client_token = auth_header.replace("Bearer ", "")
+
+            if client_token != self.token:
+                await websocket.close(
+                    code=1008, reason="Authentication failed")
+                return
+
+        await websocket.accept()
+        self.session.ws = websocket
+
+        try:
+            while True:
+                message = await websocket.receive()
+
+                if "text" in message:
+                    if message["text"] == "PING":
+                        await websocket.send_text("PONG")
+                elif "bytes" in message:
+                    try:
+                        response = await self.session.take_action(
+                            message["bytes"]
+                        )
+                    except Exception as e:
+                        clog.error(f"WebSocket error: {e}")
+                        response = None
+                    if response is not None:
+                        await websocket.send_bytes(response)
+                        clog.debug(f"Sent message: {response}")
+                elif message.get("type") == "websocket.disconnect":
+                    break
+
+        except Exception as e:
+            clog.error(f"WebSocket error: {e}")
+
+    async def serve_root_file(self, request):
+        """Serve files from the root directory.
+
+        Parameters
+        ----------
+        request : Request
+            The HTTP request object
+
+        Returns
+        -------
+        FileResponse
+            The HTTP response containing the requested file or index.html
+        """
+        filename = request.path_params["filename"]
+        file_path = os.path.join(self.frontend_folder, filename)
+        if os.path.exists(file_path):
+            return FileResponse(file_path)
+        return FileResponse(os.path.join(self.frontend_folder, "index.html"))
+
+    def create_app(self):
+        """Create the Starlette application with routes.
+
+        Returns
+        -------
+        Starlette
+            The configured Starlette application
+        """
+        routes = []
+
+        # HTTP Route
+        routes.append(Route("/", endpoint=self.http_endpoint,
+                            methods=["GET", "POST"]))
+        # WebSocket Route
+        routes.append(WebSocketRoute("/", endpoint=self.websocket_endpoint))
+
+        # Serve static files from the frontend directory
+        directory = os.path.join(self.frontend_folder, "static")
+        static = StaticFiles(directory=directory)
+        routes.append(Mount("/static", static, name="static"))
+        routes.append(Route("/{filename:path}", endpoint=self.serve_root_file))
+
+        app = Starlette(
+            routes=routes,
+            on_startup=[],
+        )
+        return app
+
+    async def open_browser_when_ready(self, url):
+        """Wait for the server to start before opening the browser.
+
+        Parameters
+        ----------
+        url : str
+            The URL to open in the browser
+
+        Returns
+        -------
+        None
+        """
+        while True:
+            try:
+                # Check if the server is responding
+                reader, writer = await asyncio.open_connection(
+                    self.host, self.port
+                )
+                writer.close()
+                await writer.wait_closed()
+                clog.debug("WebBrowser: using default browser.")
+                msg = ("WebBrowser: Trying to launch CARTA with the "
+                       f"default browser using: open {url}")
+                clog.debug(msg)
+                break
+            except (OSError, ConnectionRefusedError):
+                await asyncio.sleep(0.5)  # Retry after 0.5 sec
+
+        # Open the browser once the server is ready
+        webbrowser.open(url)
+
+    async def start(self, open_browser=True, enable_uvicorn_logs=False):
+        """Start the Starlette server to serve the frontend application.
+
+        Parameters
+        ----------
+        open_browser : bool, optional
+            Whether to open a browser window on startup, by default True
+        enable_uvicorn_logs : bool, optional
+            Whether to enable Uvicorn logs, by default False
+
+        Returns
+        -------
+        None
+        """
+        # Initialize session with async components
+        self.session = Session(
+            lock=asyncio.Lock(),
+            top_level_folder=self.top_level_folder,
+            starting_folder=self.starting_folder,
+            dask_scheduler=self.dask_scheduler)
+
+        app = self.create_app()
+
+        url = f"http://{self.host}:{self.port}/"
+        if self.token:
+            url += f"?token={self.token}"
+
+        if enable_uvicorn_logs:
+            config = uvicorn.Config(app, host=self.host, port=self.port)
+        else:
+            config = uvicorn.Config(
+                app, host=self.host, port=self.port, log_config=None
+            )
+        server = uvicorn.Server(config=config)
+
+        try:
+            await asyncio.gather(
+                self.open_browser_when_ready(url) if open_browser else None,
+                server.serve()
+            )
+        except KeyboardInterrupt:
+            pass
+        finally:
+            # When KeyboardInterrupt is received, it ends with showing
+            # "RuntimeWarning: coroutine 'wait_for' was never awaited"
+            # "RuntimeWarning: coroutine 'Client._close' was never awaited"
+            # from dask client. I tried different ways to close the dask client
+            # but it did not work. And I accidentally tried this. I do not know
+            # why this works without showing any RuntimeWarnings, but it works.
+            # Note that there is no close method in this class.
+            await self.close()
