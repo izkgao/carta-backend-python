@@ -1,9 +1,9 @@
 cd "$(dirname "$0")"
-mkdir -p carta-backend/proto/
+mkdir -p carta_backend/proto/
 
 printf "Building all modules..."
 
-protoc --python_out=carta-backend/proto/ \
+protoc --python_out=carta_backend/proto/ \
 --proto_path=carta-protobuf/shared/ \
 --proto_path=carta-protobuf/control/ \
 --proto_path=carta-protobuf/request/ \
@@ -11,7 +11,7 @@ protoc --python_out=carta-backend/proto/ \
 carta-protobuf/*/*.proto
 
 protol --create-package --in-place \
---python-out=carta-backend/proto/ \
+--python-out=carta_backend/proto/ \
 protoc \
 --proto-path=carta-protobuf/shared/ \
 --proto-path=carta-protobuf/control/ \
@@ -19,7 +19,7 @@ protoc \
 --proto-path=carta-protobuf/stream/ \
 carta-protobuf/*/*.proto
 
-cd "carta-backend/proto/"
+cd "carta_backend/proto/"
 
 # Find all .py files that do not start with "_" and append the import statement
 for file in *.py; do
