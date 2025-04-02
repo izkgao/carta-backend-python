@@ -576,7 +576,7 @@ class Session:
             async with self.lock:
                 self.fm.open(file_id, file_path, hdu_index)
 
-        _, header, _, hdu_index = self.fm.get(file_id)
+        _, header, _, hdu_index, _ = self.fm.get(file_id)
 
         # OpenFileAck
         # Create response object
@@ -884,7 +884,7 @@ class Session:
         # spatial_requirements = obj.spatial_requirements
 
         # Check boundary
-        shape = self.fm.get(file_id)[0].shape[-2:]
+        shape = self.fm.get(file_id)[4]
         x, y = int(point.x), int(point.y)
         if x < 0 or x >= shape[1] or y < 0 or y >= shape[0]:
             return None

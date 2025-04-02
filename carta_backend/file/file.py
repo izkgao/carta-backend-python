@@ -45,12 +45,14 @@ class FileManager:
             wcs = WCS(header, fix=False)
             header["PIX_AREA"] = np.abs(np.linalg.det(
                 wcs.celestial.pixel_scale_matrix))
+            img_shape = shape[-2:]
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr
             data = open_zarr(file_path)
             header = get_header_from_xradio(data)
+            img_shape = [data.sizes['m'], data.sizes['l']]
 
-        self.files[file_id] = (data, header, file_type, hdu_index)
+        self.files[file_id] = (data, header, file_type, hdu_index, img_shape)
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
