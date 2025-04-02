@@ -43,7 +43,7 @@ class FileManager:
                 chunks="auto",
             )
             wcs = WCS(header, fix=False)
-            header["PIXEL_AREA"] = np.abs(np.linalg.det(
+            header["PIX_AREA"] = np.abs(np.linalg.det(
                 wcs.celestial.pixel_scale_matrix))
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr

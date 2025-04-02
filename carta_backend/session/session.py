@@ -6,8 +6,7 @@ from time import perf_counter_ns
 from typing import Any, Optional, Tuple
 
 import dask.array as da
-import numpy as np
-import pyzfp
+import zfpy
 from astropy.io import fits
 from dask.distributed import Client
 from starlette.websockets import WebSocket
@@ -682,14 +681,13 @@ class Session:
         # Compress data
         t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
-            comp_data = pyzfp.compress(
-                data,
-                precision=compression_quality)
+            comp_data = zfpy.compress_numpy(
+                data, precision=compression_quality, write_header=False)
         elif compression_type == CARTA.CompressionType.SZ:
             # Not implemented yet
-            comp_data = data
+            comp_data = data.tobytes()
         else:
-            comp_data = data
+            comp_data = data.tobytes()
 
         nan_encodings = get_nan_encodings_block(data)
 
@@ -712,7 +710,7 @@ class Session:
         tile = CARTA.TileData()
         tile.width = data.shape[0]
         tile.height = data.shape[1]
-        tile.image_data = np.asarray(comp_data).tobytes()
+        tile.image_data = comp_data
         tile.nan_encodings = nan_encodings
 
         resp_data.tiles.append(tile)

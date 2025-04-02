@@ -22,7 +22,7 @@ dependencies = [
     "loguru",
     "dask[complete]>=2025.3.0",
     "astropy",
-    "pyzfp",
+    "zfpy",
     "uvicorn[standard]",
     "starlette",
     "xarray",

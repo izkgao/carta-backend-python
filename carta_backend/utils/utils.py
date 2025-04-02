@@ -508,7 +508,7 @@ def get_header_from_xradio(xarr):
     hdr["BMAJ"] = xarr["SKY"].user["bmaj"]
     hdr["BMIN"] = xarr["SKY"].user["bmin"]
     hdr["BPA"] = xarr["SKY"].user["bpa"]
-    hdr["PIXEL_AREA"] = np.abs(np.linalg.det(wcs.celestial.pixel_scale_matrix))
+    hdr["PIX_AREA"] = np.abs(np.linalg.det(wcs.celestial.pixel_scale_matrix))
     return hdr
 
 
