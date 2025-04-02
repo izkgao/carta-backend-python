@@ -114,29 +114,45 @@ class Server:
         await websocket.accept()
         self.session.ws = websocket
 
-        try:
-            while True:
-                message = await websocket.receive()
+        # try:
+        #     while True:
+        #         message = await websocket.receive()
 
-                if "text" in message:
-                    if message["text"] == "PING":
-                        await websocket.send_text("PONG")
-                elif "bytes" in message:
-                    try:
-                        response = await self.session.take_action(
-                            message["bytes"]
-                        )
-                    except Exception as e:
-                        clog.error(f"WebSocket error: {e}")
-                        response = None
-                    if response is not None:
-                        await websocket.send_bytes(response)
-                        clog.debug(f"Sent message: {response}")
-                elif message.get("type") == "websocket.disconnect":
-                    break
+        #         if "text" in message:
+        #             if message["text"] == "PING":
+        #                 await websocket.send_text("PONG")
+        #         elif "bytes" in message:
+        #             try:
+        #                 response = await self.session.take_action(
+        #                     message["bytes"]
+        #                 )
+        #             except Exception as e:
+        #                 clog.error(f"WebSocket error: {e}")
+        #                 response = None
+        #             if response is not None:
+        #                 await websocket.send_bytes(response)
+        #                 clog.debug(f"Sent message: {response}")
+        #         elif message.get("type") == "websocket.disconnect":
+        #             break
 
-        except Exception as e:
-            clog.error(f"WebSocket error: {e}")
+        # except Exception as e:
+        #     clog.error(f"WebSocket error: {e}")
+
+        while True:
+            message = await websocket.receive()
+
+            if "text" in message:
+                if message["text"] == "PING":
+                    await websocket.send_text("PONG")
+            elif "bytes" in message:
+                response = await self.session.take_action(
+                    message["bytes"]
+                )
+                if response is not None:
+                    await websocket.send_bytes(response)
+                    clog.debug(f"Sent message: {response}")
+            elif message.get("type") == "websocket.disconnect":
+                break
 
     async def serve_root_file(self, request):
         """Serve files from the root directory.

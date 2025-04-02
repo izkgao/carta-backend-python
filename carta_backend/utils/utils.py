@@ -3,14 +3,24 @@ import platform
 import socket
 import subprocess
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
+import dask
+import dask.array as da
 import numpy as np
+import pyzfp
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
+from dask.distributed import Client
 from numba import njit
+from xarray import Dataset
 
 from carta_backend import proto as CARTA
+from carta_backend.log import logger
+
+clog = logger.bind(name="CARTA")
+pflog = logger.bind(name="Performance")
+ptlog = logger.bind(name="Protocol")
 
 
 def is_port_available(port: int, host: str = "127.0.0.1") -> bool:
@@ -378,7 +388,7 @@ def get_nan_encodings_block(arr):
     # Based on https://gist.github.com/nvictus/66627b580c13068589957d6ab0919e66
     arr = np.isnan(arr).ravel()
     n = arr.size
-    rle = np.diff(np.r_[np.r_[0, np.flatnonzero(np.diff(arr)) + 1], n])
+    rle = np.diff(np.r_[np.r_[0, np.nonzero(np.diff(arr))[0] + 1], n])
     return rle.astype(np.uint32).tobytes()
 
 
@@ -498,35 +508,116 @@ def get_header_from_xradio(xarr):
     hdr["BMAJ"] = xarr["SKY"].user["bmaj"]
     hdr["BMIN"] = xarr["SKY"].user["bmin"]
     hdr["BPA"] = xarr["SKY"].user["bpa"]
-
+    hdr["PIXEL_AREA"] = np.abs(np.linalg.det(wcs.celestial.pixel_scale_matrix))
     return hdr
 
 
-def load_fits_data(hdul, hdu_index, channel, stokes):
-    ndim = hdul[hdu_index].data.ndim
-    if ndim == 2:
-        data = hdul[hdu_index].data
-    elif ndim == 3:
-        data = hdul[hdu_index].data[channel]
+def load_fits_data(data, channel=None, stokes=None):
+    if channel is None:
+        channel = slice(channel)
+    if stokes is None:
+        stokes = slice(stokes)
+    ndim = data.ndim
+    if ndim == 3:
+        data = data[channel]
     elif ndim == 4:
-        data = hdul[hdu_index].data[stokes][channel]
-    data = data.astype('<f4')
+        data = data[stokes][channel]
+    # data = data.astype('<f4')
     return data
 
 
-async def async_load_xradio_data(hdul, channel, stokes, time=0, client=None):
-    data = hdul['SKY'].isel(
+async def async_load_xradio_data(
+        data, channel=None, stokes=None, time=0, client=None):
+    if channel is None:
+        channel = slice(channel)
+    if stokes is None:
+        stokes = slice(stokes)
+    data = data['SKY'].isel(
         frequency=channel, polarization=stokes, time=time)
     if client is not None:
         data = await client.compute(data)
-    data = data.values
-    return data
+    return data.data
 
 
-def load_xradio_data(hdul, channel, stokes, time=0, client=None):
-    data = hdul['SKY'].isel(
+def load_xradio_data(ds, channel=None, stokes=None, time=0):
+    if channel is None:
+        channel = slice(channel)
+    if stokes is None:
+        stokes = slice(stokes)
+    data = ds['SKY'].isel(
         frequency=channel, polarization=stokes, time=time)
-    # if client is not None:
-    #     data = client.compute(data)
-    data = data.values
-    return data
+    return data.data
+
+
+def load_data(data, channel=None, stokes=None, time=0) -> Optional[da.Array]:
+    # Dask array from FITS
+    if isinstance(data, da.Array):
+        return load_fits_data(data, channel, stokes)
+    # Xarary Dataset from Xradio
+    elif isinstance(data, Dataset):
+        return load_xradio_data(data, channel, stokes, time)
+    else:
+        clog.error(f"Unsupported data type: {type(data)}")
+        return None
+
+
+async def dask_histogram(data, bins):
+    bin_min = da.nanmin(data)
+    bin_max = da.nanmax(data)
+    hist, bin_edges = da.histogram(data, bins=bins, range=[bin_min, bin_max])
+    return hist, bin_edges, bin_min
+
+
+async def get_histogram(data: da.Array, client: Client) -> CARTA.Histogram:
+    # Calculate number of bins
+    nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
+
+    # Calculate bin range
+    res = client.compute([da.nanmin(data), da.nanmax(data)])
+    bin_min, bin_max = await client.gather(res)
+
+    # Calculate histogram
+    res = client.compute(
+        da.histogram(data, bins=nbins, range=[bin_min, bin_max]))
+    hist, bin_edges = await client.gather(res)
+    bin_width = bin_edges[1] - bin_edges[0]
+    bin_centers = bin_edges[:-1] + bin_width / 2
+    mean = np.sum(hist * bin_centers) / np.sum(hist)
+    std_dev = np.sqrt(np.sum(hist * (bin_centers - mean) ** 2) / np.sum(hist))
+
+    histogram = CARTA.Histogram()
+    histogram.num_bins = nbins
+    histogram.bin_width = bin_width
+    histogram.first_bin_center = bin_min + bin_width / 2
+    histogram.bins.extend(hist)
+    histogram.mean = mean
+    histogram.std_dev = std_dev
+    return histogram
+
+
+def get_histogram_sync(data: np.ndarray) -> CARTA.Histogram:
+    nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
+    bin_min, bin_max = np.nanmin(data), np.nanmax(data)
+    bin_width = (bin_max - bin_min) / nbins
+    hist = numba_histogram(
+        data.astype('<f4').ravel(), nbins, bin_min, bin_max)
+    mean = np.nanmean(data)
+    std_dev = np.nanstd(data)
+
+    histogram = CARTA.Histogram()
+    histogram.num_bins = nbins
+    histogram.bin_width = bin_width
+    histogram.first_bin_center = bin_min + bin_width / 2
+    histogram.bins.extend(hist)
+    histogram.mean = mean
+    histogram.std_dev = std_dev
+    return histogram
+
+
+@dask.delayed
+def compress_data_zfp_dask(data, compression_quality):
+    comp_data = pyzfp.compress(
+        data,
+        precision=compression_quality)
+    nan_encodings = get_nan_encodings_block(data)
+    return np.asarray(comp_data), nan_encodings

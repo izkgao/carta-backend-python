@@ -5,24 +5,23 @@ from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, Optional, Tuple
 
+import dask.array as da
 import numpy as np
 import pyzfp
 from astropy.io import fits
 from dask.distributed import Client
 from starlette.websockets import WebSocket
 from xarray import open_zarr
-from xradio.image import load_image
 
 from carta_backend import proto as CARTA
+from carta_backend.file import FileManager
 from carta_backend.log import logger
 from carta_backend.proto.enums_pb2 import EventType, SessionType
-from carta_backend.region import get_region_slices_mask, get_spectral_profile
+from carta_backend.region import get_region, get_spectral_profile_dask
 from carta_backend.utils import (get_directory_info, get_file_info,
                                  get_file_info_extended,
-                                 get_header_from_xradio,
-                                 get_nan_encodings_block, get_system_info,
-                                 load_fits_data, load_xradio_data,
-                                 numba_histogram)
+                                 get_header_from_xradio, get_histogram,
+                                 get_nan_encodings_block, get_system_info)
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -147,6 +146,7 @@ class Session:
         self.ws = ws
         self.dask_scheduler = dask_scheduler
         self.client = client
+        self.fm = FileManager()
 
         # Set up message queue
         self.queue = asyncio.Queue()
@@ -170,6 +170,7 @@ class Session:
 
         # SpectralRequirements
         self.spec_prof_on = False
+        self.spec_prof_cursor_on = False
         self.prev_stats_type = None
 
         # Cursor
@@ -197,7 +198,8 @@ class Session:
     async def start_dask_client(self) -> None:
         self.client = await Client(
             address=self.dask_scheduler,
-            asynchronous=True
+            asynchronous=True,
+            threads_per_worker=min(12, os.cpu_count()),
         )
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
@@ -311,6 +313,11 @@ class Session:
         # Start Dask client if not started
         if self.client is None:
             await self.start_dask_client()
+
+        # Get client info
+        worker_info = self.client.cluster.scheduler_info['workers']
+        mem_limit = sum([i['memory_limit'] for i in worker_info.values()])
+        self.mem_limit = mem_limit / 1024**3  # Gibibytes
 
         # Send message
         event_id = EventType.REGISTER_VIEWER_ACK
@@ -563,24 +570,14 @@ class Session:
         hdu_index = int(hdu)
         file_info = get_file_info(file_path)
 
+        self.file_path = file_path
+
         # Open file
-        if file_id not in self.open_file_dict:
+        if file_id not in self.fm.files:
             async with self.lock:
-                if file_info.type == CARTA.FileType.FITS:
-                    self.open_file_dict[file_id] = [
-                        fits.open(file_path, memmap=True), hdu_index]
-                elif file_info.type == CARTA.FileType.CASA:
-                    xarr = load_image(file_path)
-                    self.open_file_dict[file_id] = [
-                        xarr, None]
+                self.fm.open(file_id, file_path, hdu_index)
 
-        hdul, hdu_index = self.open_file_dict[file_id]
-
-        if hdu_index is not None:
-            hdr = hdul[hdu_index].header
-        else:
-            hdr = get_header_from_xradio(hdul)
-            hdu_index = 0
+        _, header, _, hdu_index = self.fm.get(file_id)
 
         # OpenFileAck
         # Create response object
@@ -588,7 +585,7 @@ class Session:
         response.success = True
         response.file_id = file_id
         response.file_info.CopyFrom(file_info)
-        fex_dict = get_file_info_extended(hdr, hdu_index, file_name)
+        fex_dict = get_file_info_extended(header, hdu_index, file_name)
         response.file_info_extended.CopyFrom(fex_dict[str(hdu_index)])
 
         # Not implemented yet
@@ -607,17 +604,10 @@ class Session:
         channel: int = 0,
         stokes: int = 0,
     ) -> None:
-
+        """This only executes one time when the image is first loaded."""
         # Load image
         t0 = perf_counter_ns()
-        hdul, hdu_index = self.open_file_dict[file_id]
-
-        if hdu_index is not None:
-            data = load_fits_data(hdul, hdu_index, channel, stokes)
-        else:
-            # data = await async_load_xradio_data(hdul, channel, stokes,
-            #                                     client=self.client)
-            data = load_xradio_data(hdul, channel, stokes)
+        data = self.fm.get_slice(file_id, channel, stokes)
 
         dt = (perf_counter_ns() - t0) / 1e6
         mpix_s = data.size / 1e6 / dt * 1000
@@ -625,10 +615,9 @@ class Session:
         msg += f"cache in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
         clog.debug(msg)
 
-        t0 = perf_counter_ns()
-
         # RegionHistogramData
         # Not fully implemented
+        t0 = perf_counter_ns()
         response = CARTA.RegionHistogramData()
         response.file_id = file_id
         response.region_id = region_id
@@ -642,30 +631,8 @@ class Session:
         config.bounds.CopyFrom(CARTA.DoubleBounds())
         response.config.CopyFrom(config)
 
-        # # Get data
-        # hdul, hdu_index = self.open_file_dict[file_id]
-        # ndim = hdul[hdu_index].data.ndim
-
-        # if ndim == 2:
-        #     data = hdul[hdu_index].data
-        # elif ndim == 3:
-        #     data = hdul[hdu_index].data[channel]
-        # elif ndim == 4:
-        #     data = hdul[hdu_index].data[stokes][channel]
-
         # Calculate histogram
-        nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
-        bin_min, bin_max = np.nanmin(data), np.nanmax(data)
-        bin_width = (bin_max - bin_min) / nbins
-        hist = numba_histogram(
-            data.astype('<f4').ravel(), nbins, bin_min, bin_max)
-        histogram = CARTA.Histogram()
-        histogram.num_bins = nbins
-        histogram.bin_width = bin_width
-        histogram.first_bin_center = bin_min + bin_width / 2
-        histogram.bins.extend(hist)
-        histogram.mean = np.nanmean(data)
-        histogram.std_dev = np.nanstd(data)
+        histogram = await get_histogram(data, self.client)
         response.histograms.CopyFrom(histogram)
 
         # Send message
@@ -705,24 +672,27 @@ class Session:
         await self.queue.put(message)
 
         # Get data
-        hdul, hdu_index = self.open_file_dict[file_id]
+        data = self.fm.get_slice(file_id, channel, stokes)
 
-        if hdu_index is not None:
-            data = load_fits_data(hdul, hdu_index, channel, stokes)
-        else:
-            data = load_xradio_data(hdul, channel, stokes, client=self.client)
+        # Currently only support single tile
+        # The data size of a tile should not be too large
+        # So directly do compression and nan encoding
+        data = await self.client.compute(data[:, :])
 
         # Compress data
         t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
             comp_data = pyzfp.compress(
-                data.astype('<f4'),
+                data,
                 precision=compression_quality)
         elif compression_type == CARTA.CompressionType.SZ:
             # Not implemented yet
             comp_data = data
         else:
             comp_data = data
+
+        nan_encodings = get_nan_encodings_block(data)
+
         dt = (perf_counter_ns() - t0) / 1e6
         tile_width, tile_height = data.shape
         msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
@@ -743,7 +713,7 @@ class Session:
         tile.width = data.shape[0]
         tile.height = data.shape[1]
         tile.image_data = np.asarray(comp_data).tobytes()
-        tile.nan_encodings = get_nan_encodings_block(data)
+        tile.nan_encodings = nan_encodings
 
         resp_data.tiles.append(tile)
 
@@ -880,6 +850,9 @@ class Session:
                     content = [start, end, mip, width]
                     self.spat_dict[file_id][p.coordinate] = content
 
+            if file_id not in self.cursor_dict:
+                to_send = False
+
             if to_send:
                 # Read parameters
                 x, y = self.cursor_dict[file_id]
@@ -912,9 +885,14 @@ class Session:
         point = obj.point
         # spatial_requirements = obj.spatial_requirements
 
+        # Check boundary
+        shape = self.fm.get(file_id)[0].shape[-2:]
+        x, y = int(point.x), int(point.y)
+        if x < 0 or x >= shape[1] or y < 0 or y >= shape[0]:
+            return None
+
         # Record cursor and read other parameters
         async with self.lock:
-            x, y = int(point.x), int(point.y)
             self.cursor_dict[file_id] = [x, y]
             sprx = self.spat_dict[file_id]["x"]
             spry = self.spat_dict[file_id]["y"]
@@ -932,6 +910,17 @@ class Session:
             channel=channel,
             stokes=stokes
         )
+
+        # Send spectral profile
+        if self.spec_prof_cursor_on:
+            await self.send_SpectroProfileData(
+                request_id,
+                file_id,
+                region_id=0,
+                x=x,
+                y=y,
+                stats_type=2
+            )
 
         return None
 
@@ -952,28 +941,26 @@ class Session:
         t0 = perf_counter_ns()
 
         # Get data
-        hdul, hdu_index = self.open_file_dict[file_id]
+        data = self.fm.get_slice(file_id, channel, stokes)
 
-        if hdu_index is not None:
-            data = load_fits_data(hdul, hdu_index, channel, stokes)
+        # Check if x and y are valid and inside data
+        if y < 0 or y >= data.shape[0] or x < 0 or x >= data.shape[1]:
+            return None
+
+        if isinstance(data, da.Array):
+            dres = self.client.compute([
+                data[y, x],
+                data[y, slice_x].astype('<f4'),
+                data[slice_y, x].astype('<f4')
+            ])
+            value, x_profile, y_profile = await asyncio.gather(*dres)
+            value = float(value)
+            x_profile = x_profile.tobytes()
+            y_profile = y_profile.tobytes()
         else:
-            data = load_xradio_data(hdul, channel, stokes, client=self.client)
-
-        value = data[y, x]
-
-        spx = CARTA.SpatialProfile()
-        spx.coordinate = "x"
-        spx.start = slice_x.start
-        spx.end = slice_x.stop if slice_x.stop is not None else data.shape[1]
-        spx.mip = mip
-        spx.raw_values_fp32 = data[y, slice_x].astype('<f4').tobytes()
-
-        spy = CARTA.SpatialProfile()
-        spy.coordinate = "y"
-        spy.start = slice_y.start
-        spy.end = slice_y.stop if slice_y.stop is not None else data.shape[0]
-        spy.mip = mip
-        spy.raw_values_fp32 = data[slice_y, x].astype('<f4').tobytes()
+            value = float(data[y, x])
+            x_profile = data[y, slice_x].astype('<f4').tobytes()
+            y_profile = data[slice_y, x].astype('<f4').tobytes()
 
         resp = CARTA.SpatialProfileData()
         resp.file_id = file_id
@@ -984,8 +971,21 @@ class Session:
         resp.value = value
         resp.channel = channel
         resp.stokes = stokes
-        resp.profiles.append(spx)
-        resp.profiles.append(spy)
+
+        sp = CARTA.SpatialProfile()
+        sp.coordinate = "x"
+        sp.start = slice_x.start
+        sp.end = slice_x.stop if slice_x.stop is not None else data.shape[1]
+        sp.mip = mip
+        sp.raw_values_fp32 = x_profile
+        resp.profiles.append(sp)
+
+        sp.coordinate = "y"
+        sp.start = slice_y.start
+        sp.end = slice_y.stop if slice_y.stop is not None else data.shape[0]
+        sp.mip = mip
+        sp.raw_values_fp32 = y_profile
+        resp.profiles.append(sp)
 
         # Send message
         event_id = EventType.SPATIAL_PROFILE_DATA
@@ -1003,30 +1003,35 @@ class Session:
         request_id: int,
         file_id: int,
         region_id: int,
-        region_info: CARTA.RegionInfo,
-        stats_type: int
+        region_info: CARTA.RegionInfo | None = None,
+        x: int | None = None,
+        y: int | None = None,
+        stats_type: int = 2,
     ) -> None:
 
-        # Get region slices and mask
-        slicex, slicey, mask = get_region_slices_mask(region_info)
+        t0 = perf_counter_ns()
 
         # Get data
-        hdul, hdu_index = self.open_file_dict[file_id]
-        if hdu_index is not None:
-            # data = load_fits_data(hdul, hdu_index, channel, stokes)
-            data = hdul[hdu_index].data[0][:, slicey, slicex]
-        else:
-            # data = load_xradio_data(hdul, channel, stokes,
-            #                         client=self.client)
-            data = hdul['SKY'].isel(
-                polarization=0, time=0).values[:, slicey, slicex]
+        data = self.fm.get_slice(file_id, channel=None, stokes=0)
+        hdr = self.fm.get(file_id)[1]
 
         # Get spectral profile
-        spec_profile = get_spectral_profile(data, mask, stats_type)
         sp = CARTA.SpectralProfile()
         sp.coordinate = "z"
         sp.stats_type = stats_type
-        sp.raw_values_fp64 = spec_profile.astype('<f8').tobytes()
+
+        if region_id == 0:
+            spec_profile = data[:, y, x].astype('<f4')
+            spec_profile = await self.client.compute(spec_profile)
+            sp.raw_values_fp32 = spec_profile.tobytes()
+            msg_add = " cursor"
+        else:
+            region = get_region(region_info)
+            spec_profile = get_spectral_profile_dask(
+                data, region, stats_type, hdr)
+            spec_profile = await self.client.compute(spec_profile)
+            sp.raw_values_fp64 = spec_profile.tobytes()
+            msg_add = ""
 
         # Create response object
         resp = CARTA.SpectralProfileData()
@@ -1040,6 +1045,10 @@ class Session:
         event_id = EventType.SPECTRAL_PROFILE_DATA
         message = self.encode_message(event_id, request_id, resp)
         await self.queue.put(message)
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
+        pflog.debug(msg)
 
         return None
 
@@ -1083,7 +1092,7 @@ class Session:
                 file_id,
                 region_id,
                 region_info,
-                self.prev_stats_type
+                stats_type=self.prev_stats_type
             )
 
         return None
@@ -1096,55 +1105,51 @@ class Session:
         file_id = obj.file_id
         region_id = obj.region_id
         if len(obj.spectral_profiles) == 0:
-            async with self.lock:
-                self.spec_prof_on = False
+            if region_id == 0:
+                async with self.lock:
+                    self.spec_prof_cursor_on = False
+            else:
+                async with self.lock:
+                    self.spec_prof_on = False
             return None
         else:
             spectral_profile = obj.spectral_profiles[0]
-            coordinate = spectral_profile.coordinate
+            # coordinate = spectral_profile.coordinate
             stats_type = spectral_profile.stats_types[0]
             async with self.lock:
-                self.spec_prof_on = True
+                if region_id == 0:
+                    self.spec_prof_cursor_on = True
+                else:
+                    self.spec_prof_on = True
                 self.prev_stats_type = stats_type
 
         # Get region info
         async with self.lock:
-            if region_id not in self.region_dict:
+            if (region_id != 0) and (region_id not in self.region_dict):
                 return None
-            region_info = self.region_dict[region_id]["region_info"]
+            elif region_id == 0:
+                # Cursor
+                region_info = None
+                # stats_type = 2  # Sum
+                if file_id not in list(self.cursor_dict.keys()):
+                    return None
+                x, y = self.cursor_dict[file_id]
+            else:
+                # Region
+                region_info = self.region_dict[region_id]["region_info"]
+                # stats_type = self.prev_stats_type
+                x, y = None, None
 
-        # Get region slices and mask
-        slicex, slicey, mask = get_region_slices_mask(region_info)
-
-        # Get data
-        hdul, hdu_index = self.open_file_dict[file_id]
-        if hdu_index is not None:
-            # data = load_fits_data(hdul, hdu_index, channel, stokes)
-            data = hdul[hdu_index].data[0][:, slicey, slicex]
-        else:
-            # data = load_xradio_data(hdul, channel, stokes,
-            #                         client=self.client)
-            data = hdul['SKY'].isel(
-                polarization=0, time=0).values[:, slicey, slicex]
-
-        # Get spectral profile
-        spec_profile = get_spectral_profile(data, mask, stats_type)
-        sp = CARTA.SpectralProfile()
-        sp.coordinate = coordinate
-        sp.stats_type = stats_type
-        sp.raw_values_fp64 = spec_profile.astype('<f8').tobytes()
-
-        # Create response object
-        resp = CARTA.SpectralProfileData()
-        resp.file_id = file_id
-        resp.region_id = region_id
-        resp.stokes = 0
-        resp.progress = 1
-        resp.profiles.append(sp)
-
-        # Send message
-        event_id = EventType.SPECTRAL_PROFILE_DATA
-        message = self.encode_message(event_id, request_id, resp)
-        await self.queue.put(message)
+        # Send spectral profile
+        if self.spec_prof_on or self.spec_prof_cursor_on:
+            await self.send_SpectroProfileData(
+                request_id,
+                file_id,
+                region_id,
+                region_info,
+                stats_type=self.prev_stats_type,
+                x=x,
+                y=y
+            )
 
         return None
