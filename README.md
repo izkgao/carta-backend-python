@@ -5,6 +5,7 @@
 ```bash
 git clone git@github.com:izkgao/carta-backend-python.git
 cd carta-backend-python
+git submodule update --init --recursive
 ```
 
 ## Install
