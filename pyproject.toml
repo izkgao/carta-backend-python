@@ -3,7 +3,7 @@ requires = ["setuptools >= 61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "carta-backend"
+name = "carta_backend"
 version = "0.0.2"
 description = "Carta backend in Python"
 readme = "README.md"
@@ -49,4 +49,4 @@ Issues = "https://github.com/izkgao/carta-backend-python/issues"
 Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
 
 [project.scripts]
-carta-backend = "carta-backend.main:main"
+carta-backend = "carta_backend.main:main"
