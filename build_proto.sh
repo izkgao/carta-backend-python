@@ -19,4 +19,13 @@ protoc \
 --proto-path=carta-protobuf/stream/ \
 carta-protobuf/*/*.proto
 
+cd "carta_backend/proto/"
+
+# Find all .py files that do not start with "_" and append the import statement
+for file in *.py; do
+    [[ "$file" == _* || "$file" == "__init__.py" ]] && continue
+    module="${file%.py}"  # Remove the .py extension
+    echo "from .$module import *" >> __init__.py
+done
+
 printf "...done\n"
