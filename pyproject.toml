@@ -50,3 +50,6 @@ Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
 
 [project.scripts]
 carta-backend = "src.main:main"
+
+[tool.setuptools]
+script-files = ["build_proto.sh"]
