@@ -1,5 +1,5 @@
-from .utils import (async_load_xradio_data, compress_data_zfp_dask,
-                    decode_tile_coord, encode_tile_coord, get_computed_entries,
+from .utils import (async_load_xradio_data, decode_tile_coord,
+                    encode_tile_coord, get_computed_entries,
                     get_directory_info, get_file_info, get_file_info_extended,
                     get_file_type, get_header_entries, get_header_from_xradio,
                     get_histogram, get_nan_encodings_block, get_system_info,
@@ -23,6 +23,5 @@ __all__ = [
     "load_fits_data",
     "load_xradio_data",
     "async_load_xradio_data",
-    "compress_data_zfp_dask",
     "get_file_type",
     "load_data"]
