@@ -5,10 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Union
 
-import dask
 import dask.array as da
 import numpy as np
-import pyzfp
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from dask.distributed import Client
@@ -614,10 +612,10 @@ def get_histogram_sync(data: np.ndarray) -> CARTA.Histogram:
     return histogram
 
 
-@dask.delayed
-def compress_data_zfp_dask(data, compression_quality):
-    comp_data = pyzfp.compress(
-        data,
-        precision=compression_quality)
-    nan_encodings = get_nan_encodings_block(data)
-    return np.asarray(comp_data), nan_encodings
+# @dask.delayed
+# def compress_data_zfp_dask(data, compression_quality):
+#     comp_data = pyzfp.compress(
+#         data,
+#         precision=compression_quality)
+#     nan_encodings = get_nan_encodings_block(data)
+#     return np.asarray(comp_data), nan_encodings
