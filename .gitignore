@@ -175,6 +175,3 @@ cython_debug/
 
 # Windsurf
 .windsurfrules
-
-# proto
-proto/
