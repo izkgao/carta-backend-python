@@ -49,4 +49,4 @@ Issues = "https://github.com/izkgao/carta-backend-python/issues"
 Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
 
 [project.scripts]
-carta-backend = "src.main:main"
+carta-backend = "carta-backend.main:main"
