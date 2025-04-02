@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "carta-backend-python"
-version = "0.0.1"
+version = "0.0.2"
 description = "Carta backend in Python"
 readme = "README.md"
 requires-python = "==3.13.*"
@@ -20,8 +20,17 @@ maintainers = [
 
 dependencies = [
     "loguru",
-    "dask[complete]",
+    "dask[complete]>=2025.3.0",
     "astropy",
+    "pyzfp",
+    "uvicorn[standard]",
+    "starlette",
+    "xarray",
+    "protobuf",
+    "numba",
+    "shapely",
+    "rasterio",
+    "protoletariat",
 ]
 
 classifiers = [
@@ -40,4 +49,4 @@ Issues = "https://github.com/izkgao/carta-backend-python/issues"
 Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
 
 [project.scripts]
-carta = "src.main:main"
+carta-backend = "src.main:main"
