@@ -204,7 +204,8 @@ class Session:
         self.client = await Client(
             address=self.dask_scheduler,
             asynchronous=True,
-            threads_per_worker=min(12, os.cpu_count()),
+            threads_per_worker=4,
+            n_workers=os.cpu_count() // 4
         )
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
@@ -539,6 +540,8 @@ class Session:
         # If file is open, close it
         self.fm.close(file_id)
 
+        self.has_sent_histogram = False
+
         return None
 
     async def do_OpenFile(self, message: bytes) -> None:
@@ -676,6 +679,7 @@ class Session:
         priority = next(self.priority_counter)
 
         # RasterTileData
+        t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
             data = self.fm.get_slice(file_id, channel, stokes)
             data = await self.client.compute(data[:, :], priority=priority)
@@ -716,6 +720,10 @@ class Session:
                     layer=layer
                 )
 
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Get tile data group in {dt:.3f} ms"
+        pflog.debug(msg)
+
         # RasterTileSync
         resp_sync.end_sync = True
 
@@ -746,7 +754,14 @@ class Session:
         data = fill_nan_with_block_average(data)
         data = data.reshape(tile_height, tile_width)
 
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Nearest neighbour filter {tile_width}x{tile_height} "
+        msg += f"raster data to {tile_width}x{tile_height} in "
+        msg += f"{dt:.3f} ms at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        pflog.debug(msg)
+
         # Compress data
+        t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
             comp_data = zfpy.compress_numpy(
                 data, precision=compression_quality, write_header=False)
