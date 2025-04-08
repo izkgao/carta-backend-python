@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import os
 import random
 from pathlib import Path
@@ -6,9 +7,10 @@ from time import perf_counter_ns
 from typing import Any, Optional, Tuple
 
 import dask.array as da
+import numpy as np
 import zfpy
 from astropy.io import fits
-from dask.distributed import Client
+from dask.distributed import Client, as_completed
 from starlette.websockets import WebSocket
 from xarray import open_zarr
 
@@ -17,7 +19,10 @@ from carta_backend.file import FileManager
 from carta_backend.log import logger
 from carta_backend.proto.enums_pb2 import EventType, SessionType
 from carta_backend.region import get_region, get_spectral_profile_dask
-from carta_backend.utils import (get_directory_info, get_file_info,
+from carta_backend.tile import get_tile_slice
+from carta_backend.utils import (decode_tile_coord,
+                                 fill_nan_with_block_average,
+                                 get_directory_info, get_file_info,
                                  get_file_info_extended,
                                  get_header_from_xradio, get_histogram,
                                  get_nan_encodings_block, get_system_info)
@@ -154,12 +159,13 @@ class Session:
         # self.task_group = asyncio.TaskGroup()
         # Send message asynchronously
         # self.task_group.create_task(self._send_message(res1))
+        self.priority_counter = itertools.count()
 
         # FileList
         self.flag_stop_file_list = False
 
-        # OpenFile
-        self.open_file_dict = {}
+        # Histogram
+        self.has_sent_histogram = False
 
         # Channel & Stokes
         self.channel_stokes = [0, 0]
@@ -486,40 +492,36 @@ class Session:
         # Extract parameters
         directory = obj.directory
         file = obj.file
-        hdu = obj.hdu
+        # hdu = obj.hdu
         # support_aips_beam = obj.support_aips_beam
 
         # Set parameters
         directory = self.top_level_folder / directory
         file_path = str(directory / file)
-        if hdu == "":
-            hdu_index = 0
-        else:
-            hdu_index = int(hdu)
 
         # Get file info
         file_info = get_file_info(file_path)
 
         # Create response object
         response = CARTA.FileInfoResponse()
+        response.success = True
+        response.file_info.CopyFrom(file_info)
 
         # Read headers
-        if file_info.type == CARTA.FileType.FITS:
-            with fits.open(file_path) as hdul:
-                hdr = hdul[hdu_index].header
-        elif file_info.type == CARTA.FileType.CASA:
+        if file_info.type == CARTA.FileType.CASA:
             # Currently zarr
             xarr = open_zarr(file_path)
             hdr = get_header_from_xradio(xarr)
             xarr.close()
-
-        response.success = True
-        response.file_info.CopyFrom(file_info)
-
-        fex_dict = get_file_info_extended(hdr, hdu_index, file)
-
-        for k, v in fex_dict.items():
-            response.file_info_extended[k].CopyFrom(v)
+            fex_dict = get_file_info_extended([hdr], file)
+            for k, v in fex_dict.items():
+                response.file_info_extended[k].CopyFrom(v)
+        elif file_info.type == CARTA.FileType.FITS:
+            with fits.open(file_path) as hdul:
+                hdrs = [h.header for h in hdul]
+                fex_dict = get_file_info_extended(hdrs, file)
+                for k, v in fex_dict.items():
+                    response.file_info_extended[k].CopyFrom(v)
 
         # Send message
         event_id = EventType.FILE_INFO_RESPONSE
@@ -535,17 +537,7 @@ class Session:
         file_id = obj.file_id
 
         # If file is open, close it
-        if file_id in list(self.open_file_dict.keys()):
-            # Close file
-            self.open_file_dict[file_id][0].close()
-            async with self.lock:
-                del self.open_file_dict[file_id]
-        # Close all files
-        elif file_id == -1:
-            for file_id in list(self.open_file_dict.keys()):
-                self.open_file_dict[file_id][0].close()
-                async with self.lock:
-                    del self.open_file_dict[file_id]
+        self.fm.close(file_id)
 
         return None
 
@@ -576,7 +568,7 @@ class Session:
             async with self.lock:
                 self.fm.open(file_id, file_path, hdu_index)
 
-        _, header, _, hdu_index, _ = self.fm.get(file_id)
+        header = self.fm.get(file_id)[1]
 
         # OpenFileAck
         # Create response object
@@ -584,8 +576,8 @@ class Session:
         response.success = True
         response.file_id = file_id
         response.file_info.CopyFrom(file_info)
-        fex_dict = get_file_info_extended(header, hdu_index, file_name)
-        response.file_info_extended.CopyFrom(fex_dict[str(hdu_index)])
+        fex_dict = get_file_info_extended([header], file_name)
+        response.file_info_extended.CopyFrom(list(fex_dict.values())[0])
 
         # Not implemented yet
         # response.beam_table
@@ -608,11 +600,21 @@ class Session:
         t0 = perf_counter_ns()
         data = self.fm.get_slice(file_id, channel, stokes)
 
-        dt = (perf_counter_ns() - t0) / 1e6
-        mpix_s = data.size / 1e6 / dt * 1000
-        msg = f"Load {data.shape[0]}x{data.shape[1]} image to "
-        msg += f"cache in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
-        clog.debug(msg)
+        if (data.nbytes / 1024**2) > 128:
+            # If image is larger than 128MB, lazy load
+            dt = (perf_counter_ns() - t0) / 1e6
+            mpix_s = data.size / 1e6 / dt * 1000
+            msg = f"Lazy load {data.shape[0]}x{data.shape[1]} image "
+            msg += f"in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
+            clog.debug(msg)
+        else:
+            # If image is smaller than 128MB, load to cache
+            data = await self.client.compute(data)
+            dt = (perf_counter_ns() - t0) / 1e6
+            mpix_s = data.size / 1e6 / dt * 1000
+            msg = f"Load {data.shape[0]}x{data.shape[1]} image to "
+            msg += f"cache in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
+            clog.debug(msg)
 
         # RegionHistogramData
         # Not fully implemented
@@ -645,12 +647,13 @@ class Session:
 
         await self.queue.put(message)
 
-    async def send_RasterTileData(
+    async def send_RasterTileSync(
         self,
         request_id: int,
         file_id: int,
         compression_type: int,
         compression_quality: int,
+        tiles: list = [],
         channel: int = 0,
         stokes: int = 0,
     ) -> None:
@@ -663,23 +666,87 @@ class Session:
         resp_sync.sync_id = file_id + 1
         # Not implemented
         # resp_sync.animation_id = 0
-        resp_sync.tile_count = 1
+        resp_sync.tile_count = len(tiles)
 
         # Send message
         event_id = EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_id, request_id, resp_sync)
         await self.queue.put(message)
 
-        # Get data
-        data = self.fm.get_slice(file_id, channel, stokes)
+        priority = next(self.priority_counter)
 
-        # Currently only support single tile
-        # The data size of a tile should not be too large
-        # So directly do compression and nan encoding
-        data = await self.client.compute(data[:, :])
+        # RasterTileData
+        if tiles is None or tiles[0] == 0:
+            data = self.fm.get_slice(file_id, channel, stokes)
+            data = await self.client.compute(data[:, :], priority=priority)
+            await self.send_RasterTileData(
+                request_id=request_id,
+                file_id=file_id,
+                data=data,
+                compression_type=compression_type,
+                compression_quality=compression_quality,
+                channel=channel,
+                stokes=stokes
+            )
+        else:
+            layer = decode_tile_coord(tiles[0])[2]
+            data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
+            image_shape = self.fm.get(file_id)[4]
+            futures = {}
+
+            for tile in tiles:
+                x, y, layer = decode_tile_coord(tile)
+                slicey, slicex = get_tile_slice(x, y, layer, image_shape)
+                future = self.client.compute(
+                    data[slicey, slicex], priority=priority)
+                futures[future] = (x, y, layer)
+
+            async for future in as_completed(futures):
+                x, y, layer = futures[future]
+                await self.send_RasterTileData(
+                    request_id=request_id,
+                    file_id=file_id,
+                    data=await future,
+                    compression_type=compression_type,
+                    compression_quality=compression_quality,
+                    channel=channel,
+                    stokes=stokes,
+                    x=x,
+                    y=y,
+                    layer=layer
+                )
+
+        # RasterTileSync
+        resp_sync.end_sync = True
+
+        # Send message
+        event_id = EventType.RASTER_TILE_SYNC
+        message = self.encode_message(event_id, request_id, resp_sync)
+        await self.queue.put(message)
+
+        return None
+
+    async def send_RasterTileData(
+        self,
+        request_id: int,
+        file_id: int,
+        data: np.ndarray,
+        compression_type: int,
+        compression_quality: int,
+        channel: int = 0,
+        stokes: int = 0,
+        x: int = None,
+        y: int = None,
+        layer: int = None,
+    ) -> None:
+
+        t0 = perf_counter_ns()
+        tile_height, tile_width = data.shape
+        nan_encodings = get_nan_encodings_block(data).tobytes()
+        data = fill_nan_with_block_average(data)
+        data = data.reshape(tile_height, tile_width)
 
         # Compress data
-        t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
             comp_data = zfpy.compress_numpy(
                 data, precision=compression_quality, write_header=False)
@@ -689,10 +756,7 @@ class Session:
         else:
             comp_data = data.tobytes()
 
-        nan_encodings = get_nan_encodings_block(data)
-
         dt = (perf_counter_ns() - t0) / 1e6
-        tile_width, tile_height = data.shape
         msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
         msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
         pflog.debug(msg)
@@ -708,24 +772,22 @@ class Session:
         # resp_data.animation_id = 0
 
         tile = CARTA.TileData()
-        tile.width = data.shape[0]
-        tile.height = data.shape[1]
+        tile.width = tile_width
+        tile.height = tile_height
         tile.image_data = comp_data
         tile.nan_encodings = nan_encodings
+        if x is not None:
+            tile.x = x
+        if y is not None:
+            tile.y = y
+        if layer is not None:
+            tile.layer = layer
 
         resp_data.tiles.append(tile)
 
         # Send message
         event_id = EventType.RASTER_TILE_DATA
         message = self.encode_message(event_id, request_id, resp_data)
-        await self.queue.put(message)
-
-        # RasterTileSync
-        resp_sync.end_sync = True
-
-        # Send message
-        event_id = EventType.RASTER_TILE_SYNC
-        message = self.encode_message(event_id, request_id, resp_sync)
         await self.queue.put(message)
 
         return None
@@ -736,26 +798,32 @@ class Session:
 
         # Extract parameters
         file_id = obj.file_id
-        # tiles = obj.tiles
+        tiles = obj.tiles
         compression_type = obj.compression_type
         compression_quality = obj.compression_quality
         # current_tiles = obj.current_tiles
 
+        # Set parameters
+        tiles = list(tiles)
+
         # RegionHistogramData
-        await self.send_RegionHistogramData(
-            request_id,
-            file_id,
-            region_id=-1,
-            channel=0,
-            stokes=0
-        )
+        if not self.has_sent_histogram:
+            await self.send_RegionHistogramData(
+                request_id,
+                file_id,
+                region_id=-1,
+                channel=0,
+                stokes=0
+            )
+            self.has_sent_histogram = True
 
         # RasterTile
-        await self.send_RasterTileData(
+        await self.send_RasterTileSync(
             request_id,
             file_id,
             compression_type,
             compression_quality,
+            tiles=tiles,
             channel=0,
             stokes=0
         )
@@ -775,8 +843,7 @@ class Session:
         # channel_range = obj.channel_range
         # current_range = obj.current_range
         # channel_map_enabled = obj.channel_map_enabled
-        # Tiles
-        # tiles = required_tiles.tiles
+        tiles = required_tiles.tiles
         compression_type = required_tiles.compression_type
         compression_quality = required_tiles.compression_quality
 
@@ -794,11 +861,12 @@ class Session:
         )
 
         # RasterTile
-        await self.send_RasterTileData(
+        await self.send_RasterTileSync(
             request_id,
             file_id,
             compression_type,
             compression_quality,
+            tiles=tiles,
             channel=channel,
             stokes=stokes
         )

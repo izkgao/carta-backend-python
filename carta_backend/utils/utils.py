@@ -201,26 +201,33 @@ def get_computed_entries(hdr, hdu_index, file_name):
     h.value = str(hdu_index)
     computed_entries.append(h)
 
+    if "EXTNAME" in hdr:
+        h = CARTA.HeaderEntry()
+        h.name = "Extension name"
+        h.value = hdr["EXTNAME"]
+        computed_entries.append(h)
+
     h = CARTA.HeaderEntry()
     h.name = "Data type"
-    h.value = "float"
+    h.value = "float" if hdr["BITPIX"] < 0 else "int"
     computed_entries.append(h)
 
-    h = CARTA.HeaderEntry()
-    h.name = "Shape"
+    # Not implemented yet
+    # h = CARTA.HeaderEntry()
+    # h.name = "Shape"
 
-    values = []
-    for i in hdr.keys():
-        if i.startswith("NAXIS") and len(i) > 5:
-            values.append(hdr[i])
+    # values = []
+    # for i in hdr.keys():
+    #     if i.startswith("NAXIS") and len(i) > 5:
+    #         values.append(hdr[i])
 
-    names = []
-    for i in hdr.keys():
-        if i.startswith("CTYPE") and len(i) > 5:
-            names.append(hdr[i].split("-")[0])
+    # names = []
+    # for i in hdr.keys():
+    #     if i.startswith("CTYPE") and len(i) > 5:
+    #         names.append(hdr[i].split("-")[0])
 
-    h.value = f"{str(values)} {str(names)}"
-    computed_entries.append(h)
+    # h.value = f"{str(values)} {str(names)}"
+    # computed_entries.append(h)
 
     h = CARTA.HeaderEntry()
     h.name = "Number of channels"
@@ -243,53 +250,71 @@ def get_computed_entries(hdr, hdu_index, file_name):
     computed_entries.append(h)
 
     # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "Projection"
-    h.value = "SIN"
-    computed_entries.append(h)
+    # h = CARTA.HeaderEntry()
+    # h.name = "Projection"
+    # h.value = "SIN"
+    # computed_entries.append(h)
 
-    h = CARTA.HeaderEntry()
-    h.name = "Image reference pixels"
-    h.value = f"[{int(hdr['CRPIX1'])}, {int(hdr['CRPIX2'])}]"
-    computed_entries.append(h)
-
-    h = CARTA.HeaderEntry()
-    h.name = "Image reference coords"
-    coord = SkyCoord(ra=hdr["CRVAL1"], dec=hdr["CRVAL2"], unit="deg")
-    coords = coord.to_string("hmsdms", sep=":", precision=4).split()
-    h.value = f"[{coords[0]}, {coords[1]}]"
-    computed_entries.append(h)
-
-    h = CARTA.HeaderEntry()
-    h.name = "Image ref coords (deg)"
-    h.value = f"[{hdr['CRVAL1']:.4f} deg, {hdr['CRVAL2']:.4f} deg]"
-    computed_entries.append(h)
-
-    h = CARTA.HeaderEntry()
-    h.name = "Pixel increment"
-    h.value = f'{hdr["CDELT1"]*3600}\", {hdr["CDELT2"]*3600}\"'
-    computed_entries.append(h)
-
-    h = CARTA.HeaderEntry()
-    h.name = "Pixel unit"
-    h.value = hdr['BUNIT']
-    computed_entries.append(h)
-
-    h = CARTA.HeaderEntry()
-    h.name = "Celestial frame"
-    eq = hdr["EQUINOX"]
-    if isinstance(eq, str):
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Image reference pixels"
+        h.value = f"[{int(hdr['CRPIX1'])}, {int(hdr['CRPIX2'])}]"
+        computed_entries.append(h)
+    except KeyError:
         pass
-    elif eq < 2000:
-        eq = f"B{eq}"
-    else:
-        eq = f"J{eq}"
-    if "RADESYS" in hdr:
-        value = f"{hdr['RADESYS']}, {eq}"
-    else:
-        value = eq
-    h.value = value
-    computed_entries.append(h)
+
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Image reference coords"
+        coord = SkyCoord(ra=hdr["CRVAL1"], dec=hdr["CRVAL2"], unit="deg")
+        coords = coord.to_string("hmsdms", sep=":", precision=4).split()
+        h.value = f"[{coords[0]}, {coords[1]}]"
+        computed_entries.append(h)
+    except KeyError:
+        pass
+
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Image ref coords (deg)"
+        h.value = f"[{hdr['CRVAL1']:.4f} deg, {hdr['CRVAL2']:.4f} deg]"
+        computed_entries.append(h)
+    except KeyError:
+        pass
+
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Pixel increment"
+        h.value = f'{hdr["CDELT1"]*3600}\", {hdr["CDELT2"]*3600}\"'
+        computed_entries.append(h)
+    except KeyError:
+        pass
+
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Pixel unit"
+        h.value = hdr['BUNIT']
+        computed_entries.append(h)
+    except KeyError:
+        pass
+
+    try:
+        h = CARTA.HeaderEntry()
+        h.name = "Celestial frame"
+        eq = hdr["EQUINOX"]
+        if isinstance(eq, str):
+            pass
+        elif eq < 2000:
+            eq = f"B{eq}"
+        else:
+            eq = f"J{eq}"
+        if "RADESYS" in hdr:
+            value = f"{hdr['RADESYS']}, {eq}"
+        else:
+            value = eq
+        h.value = value
+        computed_entries.append(h)
+    except KeyError:
+        pass
 
     h = CARTA.HeaderEntry()
     h.name = "Spectral frame"
@@ -341,43 +366,50 @@ def get_computed_entries(hdr, hdu_index, file_name):
     computed_entries.append(h)
 
     # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "Stokes coverage"
-    if "STOKES" in hdr["CTYPE4"].upper():
-        value = "[I]"
-    else:
-        value = ""
-    h.value = value
-    computed_entries.append(h)
+    # h = CARTA.HeaderEntry()
+    # h.name = "Stokes coverage"
+    # if "STOKES" in hdr["CTYPE4"].upper():
+    #     value = "[I]"
+    # else:
+    #     value = ""
+    # h.value = value
+    # computed_entries.append(h)
 
     return computed_entries
 
 
-def get_file_info_extended(hdr, hdu_index, file_name):
-    fex = CARTA.FileInfoExtended()
-    fex.dimensions = hdr['NAXIS']
-    fex.width = hdr['NAXIS1']
-    fex.height = hdr['NAXIS2']
-    fex.depth = hdr.get('NAXIS3', 1)
-    fex.stokes = hdr.get('NAXIS4', 0)
-    # fex.stokes_vals
+def get_file_info_extended(headers, file_name):
+    fex_dict = {}
 
-    header_entries = get_header_entries(hdr)
-    fex.header_entries.extend(header_entries)
+    for hdu_index, hdr in enumerate(headers):
+        if hdr['NAXIS'] == 0:
+            continue
+        fex = CARTA.FileInfoExtended()
+        fex.dimensions = hdr['NAXIS']
+        fex.width = hdr['NAXIS1']
+        fex.height = hdr['NAXIS2']
+        fex.depth = hdr.get('NAXIS3', 1)
+        fex.stokes = hdr.get('NAXIS4', 1)
+        # fex.stokes_vals
 
-    computed_entries = get_computed_entries(hdr, hdu_index, file_name)
-    fex.computed_entries.extend(computed_entries)
+        header_entries = get_header_entries(hdr)
+        fex.header_entries.extend(header_entries)
 
-    # Not implemented yet
-    a = CARTA.AxesNumbers()
-    a.spatial_x = 1
-    a.spatial_y = 2
-    a.spectral = 3
-    a.stokes = 4
-    a.depth = 3
-    fex.axes_numbers.CopyFrom(a)
+        computed_entries = get_computed_entries(hdr, hdu_index, file_name)
+        fex.computed_entries.extend(computed_entries)
 
-    fex_dict = {str(hdu_index): fex}
+        # Not implemented yet
+        a = CARTA.AxesNumbers()
+        a.spatial_x = 1
+        a.spatial_y = 2
+        if "NAXIS3" in hdr:
+            a.spectral = 3
+            a.depth = 3
+        if "NAXIS4" in hdr:
+            a.stokes = 4
+        fex.axes_numbers.CopyFrom(a)
+
+        fex_dict[str(hdu_index)] = fex
 
     return fex_dict
 
@@ -386,8 +418,11 @@ def get_nan_encodings_block(arr):
     # Based on https://gist.github.com/nvictus/66627b580c13068589957d6ab0919e66
     arr = np.isnan(arr).ravel()
     n = arr.size
-    rle = np.diff(np.r_[np.r_[0, np.nonzero(np.diff(arr))[0] + 1], n])
-    return rle.astype(np.uint32).tobytes()
+    if arr[0]:
+        rle = np.diff(np.r_[np.r_[0, 0, np.nonzero(np.diff(arr))[0] + 1], n])
+    else:
+        rle = np.diff(np.r_[np.r_[0, np.nonzero(np.diff(arr))[0] + 1], n])
+    return rle.astype(np.uint32)
 
 
 @njit
@@ -396,8 +431,9 @@ def numba_histogram(data, bins, bin_min, bin_max):
     bin_width = (bin_max - bin_min) / bins
 
     for x in data:
-        if not np.isnan(x) and bin_min <= x < bin_max:
+        if not np.isnan(x) and bin_min <= x <= bin_max:
             bin_idx = int((x - bin_min) / bin_width)
+            bin_idx = min(hist.size - 1, bin_idx)
             hist[bin_idx] += 1
 
     return hist
@@ -493,7 +529,10 @@ def get_header_from_xradio(xarr):
     wcs.pixel_shape = shape
 
     # Get header
+    bitpix_mapping = {"uint8": 8, "int16": 16, "int32": 32, "int64": 64,
+                      "float32": -32, "float64": -64}
     hdr = wcs.to_header()
+    hdr["BITPIX"] = bitpix_mapping[xarr["SKY"].dtype.name]
     hdr["NAXIS"] = hdr["WCSAXES"]
     for i, v in enumerate(wcs.pixel_shape):
         hdr[f"NAXIS{i+1}"] = v
@@ -566,7 +605,7 @@ async def dask_histogram(data, bins):
     return hist, bin_edges, bin_min
 
 
-async def get_histogram(data: da.Array, client: Client) -> CARTA.Histogram:
+async def get_histogram_dask(data, client: Client):
     # Calculate number of bins
     nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
 
@@ -593,14 +632,21 @@ async def get_histogram(data: da.Array, client: Client) -> CARTA.Histogram:
     return histogram
 
 
-def get_histogram_sync(data: np.ndarray) -> CARTA.Histogram:
+def get_histogram_numpy(data: np.ndarray) -> CARTA.Histogram:
+    # Calculate number of bins
     nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
+
+    # Calculate bin range
     bin_min, bin_max = np.nanmin(data), np.nanmax(data)
     bin_width = (bin_max - bin_min) / nbins
+
+    # Calculate histogram
     hist = numba_histogram(
         data.astype('<f4').ravel(), nbins, bin_min, bin_max)
-    mean = np.nanmean(data)
-    std_dev = np.nanstd(data)
+    bin_edges = np.linspace(bin_min, bin_max, nbins + 1)
+    bin_centers = bin_edges[:-1] + bin_width / 2
+    mean = np.sum(hist * bin_centers) / np.sum(hist)
+    std_dev = np.sqrt(np.sum(hist * (bin_centers - mean) ** 2) / np.sum(hist))
 
     histogram = CARTA.Histogram()
     histogram.num_bins = nbins
@@ -612,6 +658,15 @@ def get_histogram_sync(data: np.ndarray) -> CARTA.Histogram:
     return histogram
 
 
+async def get_histogram(
+        data: da.Array | np.ndarray, client: Client
+        ) -> CARTA.Histogram:
+    if isinstance(data, da.Array):
+        return await get_histogram_dask(data, client)
+    elif isinstance(data, np.ndarray):
+        return get_histogram_numpy(data)
+
+
 # @dask.delayed
 # def compress_data_zfp_dask(data, compression_quality):
 #     comp_data = pyzfp.compress(
@@ -619,3 +674,85 @@ def get_histogram_sync(data: np.ndarray) -> CARTA.Histogram:
 #         precision=compression_quality)
 #     nan_encodings = get_nan_encodings_block(data)
 #     return np.asarray(comp_data), nan_encodings
+
+
+def pad_for_coarsen(darray, coarsen_factors):
+    """
+    Pad a 2D dask array with NaN values to make its dimensions divisible
+    by coarsen_factors.
+
+    Parameters:
+    -----------
+    darray : dask.array
+        Input 2D dask array to be padded
+    coarsen_factors : tuple of int
+        Factors by which to coarsen each dimension (e.g., (4, 4))
+
+    Returns:
+    --------
+    dask.array
+        Padded dask array with dimensions divisible by coarsen_factors
+    """
+    # Get current shape
+    orig_shape = darray.shape
+
+    # Calculate required dimensions that are divisible by the coarsen factors
+    padded_shape = []
+    pad_widths = []
+
+    for dim, factor in zip(orig_shape, coarsen_factors):
+        # Calculate required padding
+        remainder = dim % factor
+        padding_needed = 0 if remainder == 0 else factor - remainder
+        padded_shape.append(dim + padding_needed)
+
+        # Padding configuration for this dimension
+        # We pad only at the end of each dimension
+        pad_widths.append((0, padding_needed))
+
+    # Pad the array with NaN values
+    padded_array = da.pad(
+        darray,
+        pad_width=pad_widths,
+        mode="constant",
+        constant_values=da.nan
+    )
+
+    return padded_array
+
+
+@njit
+def fill_nan_with_block_average(data, offset=0):
+    h, w = data.shape
+    data = data.ravel()
+
+    for i in range(0, w, 4):
+        for j in range(0, h, 4):
+            block_start = offset + j * w + i
+            valid_count = 0
+            sum_val = 0.0
+
+            # Limit block size at image edges
+            block_width = min(4, w - i)
+            block_height = min(4, h - j)
+
+            # Calculate sum and count of non-NaN values in block
+            for x in range(block_width):
+                for y in range(block_height):
+                    idx = block_start + (y * w) + x
+                    v = data[idx]
+                    if not np.isnan(v):
+                        valid_count += 1
+                        sum_val += v
+
+            # Only process blocks with both NaN and non-NaN values
+            if valid_count > 0 and valid_count < (block_width * block_height):
+                average = sum_val / valid_count
+
+                # Replace NaNs with the block average
+                for x in range(block_width):
+                    for y in range(block_height):
+                        idx = block_start + (y * w) + x
+                        if np.isnan(data[idx]):
+                            data[idx] = average
+    return data

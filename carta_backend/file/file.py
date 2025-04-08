@@ -6,7 +6,9 @@ from astropy.wcs import WCS
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
+from carta_backend.config.config import TILE_SHAPE
 from carta_backend.log import logger
+from carta_backend.tile import layer_to_mip
 from carta_backend.utils import (get_file_type, get_header_from_xradio,
                                  load_data)
 
@@ -46,13 +48,19 @@ class FileManager:
             header["PIX_AREA"] = np.abs(np.linalg.det(
                 wcs.celestial.pixel_scale_matrix))
             img_shape = shape[-2:]
+            msg = f"File ID '{file_id}' of shape {shape} opened "
+            msg += f"with chunking: {data.chunksize}"
+            clog.debug(msg)
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr
             data = open_zarr(file_path)
             header = get_header_from_xradio(data)
             img_shape = [data.sizes['m'], data.sizes['l']]
-
-        self.files[file_id] = (data, header, file_type, hdu_index, img_shape)
+            msg = f"File ID '{file_id}' of shape {data.shape} opened "
+            msg += f"with chunking: {data.chunksize}"
+            clog.debug(msg)
+        self.files[file_id] = (
+            data, header, file_type, hdu_index, img_shape)
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
@@ -61,8 +69,9 @@ class FileManager:
             return None
         return self.files[file_id]
 
-    def get_slice(self, file_id, channel, stokes, time=0):
-        name = f"{file_id}_{channel}_{stokes}_{time}"
+    def get_slice(self, file_id, channel, stokes, time=0,
+                  layer=None, coarsen_func=da.nanmean):
+        name = f"{file_id}_{channel}_{stokes}_{time}_{layer}"
         if name in self.cache:
             return self.cache[name]
         else:
@@ -74,6 +83,16 @@ class FileManager:
 
         data = self.files[file_id][0]
         data = load_data(data, channel, stokes, time)
+        if layer is not None:
+            mip = layer_to_mip(
+                layer,
+                image_shape=self.files[file_id][4],
+                tile_shape=TILE_SHAPE)
+
+            if mip > 1:
+                data = da.coarsen(
+                    coarsen_func, data, {0: mip, 1: mip}, trim_excess=True)
+
         self.cache[name] = data
         return data
 
@@ -85,9 +104,21 @@ class FileManager:
                 self.files[file_id][0].close()
             del self.files[file_id]
             # Clear cache
-            for key in self.cache.keys():
-                if key.startswith(file_id):
+            for key in list(self.cache.keys()):
+                if key.startswith(str(file_id)):
                     del self.cache[key]
+        elif file_id == -1:
+            for file_id in list(self.files.keys()):
+                clog.debug(f"Closing file ID '{file_id}'.")
+                if hasattr(self.files[file_id][0], "close"):
+                    self.files[file_id][0].close()
+                del self.files[file_id]
+                # Clear cache
+                for key in list(self.cache.keys()):
+                    if key.startswith(str(file_id)):
+                        del self.cache[key]
+        else:
+            clog.debug(f"File ID '{file_id}' not found.")
 
     def clear(self):
         """Remove all managed files."""
