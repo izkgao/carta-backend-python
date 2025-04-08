@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import dask.array as da
+import numba as nb
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
@@ -425,20 +426,6 @@ def get_nan_encodings_block(arr):
     return rle.astype(np.uint32)
 
 
-@njit
-def numba_histogram(data, bins, bin_min, bin_max):
-    hist = np.zeros(bins, dtype=np.int64)
-    bin_width = (bin_max - bin_min) / bins
-
-    for x in data:
-        if not np.isnan(x) and bin_min <= x <= bin_max:
-            bin_idx = int((x - bin_min) / bin_width)
-            bin_idx = min(hist.size - 1, bin_idx)
-            hist[bin_idx] += 1
-
-    return hist
-
-
 def encode_tile_coord(x, y, layer):
     return (layer << 24) | (y << 12) | x
 
@@ -598,6 +585,20 @@ def load_data(data, channel=None, stokes=None, time=0) -> Optional[da.Array]:
         return None
 
 
+@njit(nb.int64[:](nb.float32[:], nb.int64, nb.float64, nb.float64))
+def numba_histogram(data, bins, bin_min, bin_max):
+    hist = np.zeros(bins, dtype=np.int64)
+    bin_width = (bin_max - bin_min) / bins
+
+    for x in data:
+        if not np.isnan(x) and bin_min <= x <= bin_max:
+            bin_idx = int((x - bin_min) / bin_width)
+            bin_idx = min(hist.size - 1, bin_idx)
+            hist[bin_idx] += 1
+
+    return hist
+
+
 async def dask_histogram(data, bins):
     bin_min = da.nanmin(data)
     bin_max = da.nanmax(data)
@@ -662,8 +663,10 @@ async def get_histogram(
         data: da.Array | np.ndarray, client: Client
         ) -> CARTA.Histogram:
     if isinstance(data, da.Array):
+        clog.debug("Using dask histogram")
         return await get_histogram_dask(data, client)
     elif isinstance(data, np.ndarray):
+        clog.debug("Using numba histogram")
         return get_histogram_numpy(data)
 
 
