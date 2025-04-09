@@ -750,8 +750,9 @@ class Session:
 
         t0 = perf_counter_ns()
         tile_height, tile_width = data.shape
-        nan_encodings = get_nan_encodings_block(data).tobytes()
-        data = fill_nan_with_block_average(data)
+        nan_encodings = await asyncio.to_thread(get_nan_encodings_block, data)
+        nan_encodings = nan_encodings.tobytes()
+        data = await asyncio.to_thread(fill_nan_with_block_average, data)
         data = data.reshape(tile_height, tile_width)
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -763,8 +764,11 @@ class Session:
         # Compress data
         t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
-            comp_data = zfpy.compress_numpy(
-                data, precision=compression_quality, write_header=False)
+            comp_data = await asyncio.to_thread(
+                zfpy.compress_numpy,
+                data,
+                precision=compression_quality,
+                write_header=False)
         elif compression_type == CARTA.CompressionType.SZ:
             # Not implemented yet
             comp_data = data.tobytes()

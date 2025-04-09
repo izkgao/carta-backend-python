@@ -1,3 +1,4 @@
+import asyncio
 import os
 import platform
 import socket
@@ -667,7 +668,7 @@ async def get_histogram(
         return await get_histogram_dask(data, client)
     elif isinstance(data, np.ndarray):
         clog.debug("Using numba histogram")
-        return get_histogram_numpy(data)
+        return await asyncio.to_thread(get_histogram_numpy, data)
 
 
 # @dask.delayed
