@@ -4,10 +4,10 @@ import sys
 from importlib.metadata import version as get_version
 from uuid import uuid4
 
-from .log import configure_logger, logger
-from .server import Server
-from .settings import ProgramSettings
-from .utils import is_port_available
+from carta_backend.log import configure_logger, logger
+from carta_backend.server import Server
+from carta_backend.settings import ProgramSettings
+from carta_backend.utils import is_port_available
 
 
 def main():
