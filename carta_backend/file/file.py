@@ -1,7 +1,6 @@
 import astropy.io.fits as fits
 import dask
 import dask.array as da
-import dask.graph_manipulation as dgm
 import numpy as np
 from astropy.wcs import WCS
 from xarray import open_zarr
@@ -113,7 +112,6 @@ class FileManager:
             data = self.files[file_id]["data"]
 
         data = load_data(data, channel, stokes, time)
-        data = dgm.clone(data)
 
         if layer is not None:
             mip = layer_to_mip(
