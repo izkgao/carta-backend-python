@@ -4,6 +4,8 @@ import sys
 from importlib.metadata import version as get_version
 from uuid import uuid4
 
+import dask.config
+
 from carta_backend.log import configure_logger, logger
 from carta_backend.server import Server
 from carta_backend.settings import ProgramSettings
@@ -169,6 +171,12 @@ def main():
         action="store_true",
         help="Used when backend is launched by carta-controller",
     )
+    parser.add_argument(
+        "--dask_chunk_size",
+        type=str,
+        default="132.25Mib",
+        help="Chunk size for Dask arrays",
+    )
 
     args = parser.parse_args()
 
@@ -235,6 +243,9 @@ def main():
         scripting_url = f"{base_url}/api/scripting/action"
         clog.debug(f"To use the CARTA scripting interface, "
                    f"send POST requests to {scripting_url}")
+
+    # Set Dask chunk size
+    dask.config.set({"array.chunk-size": args.dask_chunk_size})
 
     # Start server
     server = Server(
