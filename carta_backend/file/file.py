@@ -1,6 +1,7 @@
 import astropy.io.fits as fits
 import dask
 import dask.array as da
+import dask.graph_manipulation as dgm
 import numpy as np
 from astropy.wcs import WCS
 from xarray import open_zarr
@@ -51,16 +52,41 @@ class FileManager:
             msg = f"File ID '{file_id}' of shape {shape} opened "
             msg += f"with chunking: {data.chunksize}"
             clog.debug(msg)
+
+            if data.ndim <= 2:
+                chunks = "auto"
+                frames = data
+            elif data.ndim == 3:
+                chunks = {0: 1, 1: 1, 2: "auto"}
+            elif data.ndim == 4:
+                chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
+
+            if chunks != "auto":
+                frames = mmap_dask_array(
+                    filename=file_path,
+                    shape=shape,
+                    dtype=dtype,
+                    offset=offset,
+                    chunks=chunks,
+                )
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr
             data = open_zarr(file_path)
             header = get_header_from_xradio(data)
             img_shape = [data.sizes['m'], data.sizes['l']]
-            msg = f"File ID '{file_id}' of shape {data.shape} opened "
-            msg += f"with chunking: {data.chunksize}"
+            msg = f"File ID '{file_id}' of shape {data.sizes.mapping} opened "
+            msg += f"with chunking: {data.SKY.data.chunksize}"
             clog.debug(msg)
-        self.files[file_id] = (
-            data, header, file_type, hdu_index, img_shape)
+            frames = data
+
+        self.files[file_id] = {
+            "data": data,
+            "frames": frames,
+            "header": header,
+            "file_type": file_type,
+            "hdu_index": hdu_index,
+            "img_shape": img_shape
+        }
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
@@ -81,12 +107,18 @@ class FileManager:
                 if key.startswith(str(file_id)):
                     del self.cache[key]
 
-        data = self.files[file_id][0]
+        if isinstance(channel, int):
+            data = self.files[file_id]["frames"]
+        else:
+            data = self.files[file_id]["data"]
+
         data = load_data(data, channel, stokes, time)
+        data = dgm.clone(data)
+
         if layer is not None:
             mip = layer_to_mip(
                 layer,
-                image_shape=self.files[file_id][4],
+                image_shape=self.files[file_id]["img_shape"],
                 tile_shape=TILE_SHAPE)
 
             if mip > 1:
@@ -100,8 +132,8 @@ class FileManager:
         """Remove a file from the manager."""
         if file_id in self.files:
             clog.debug(f"Closing file ID '{file_id}'.")
-            if hasattr(self.files[file_id][0], "close"):
-                self.files[file_id][0].close()
+            if hasattr(self.files[file_id]["data"], "close"):
+                self.files[file_id]["data"].close()
             del self.files[file_id]
             # Clear cache
             for key in list(self.cache.keys()):
@@ -110,8 +142,8 @@ class FileManager:
         elif file_id == -1:
             for file_id in list(self.files.keys()):
                 clog.debug(f"Closing file ID '{file_id}'.")
-                if hasattr(self.files[file_id][0], "close"):
-                    self.files[file_id][0].close()
+                if hasattr(self.files[file_id]["data"], "close"):
+                    self.files[file_id]["data"].close()
                 del self.files[file_id]
                 # Clear cache
                 for key in list(self.cache.keys()):
