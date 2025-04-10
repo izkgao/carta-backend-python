@@ -684,7 +684,7 @@ async def get_histogram_dask(data, client: Client):
     histogram = CARTA.Histogram()
     histogram.num_bins = nbins
     histogram.bin_width = bin_width
-    histogram.first_bin_center = bin_min + bin_width / 2
+    histogram.first_bin_center = bin_centers[0]
     histogram.bins.extend(hist)
     histogram.mean = mean
     histogram.std_dev = std_dev
