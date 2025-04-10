@@ -571,7 +571,7 @@ class Session:
             async with self.lock:
                 self.fm.open(file_id, file_path, hdu_index)
 
-        header = self.fm.get(file_id)[1]
+        header = self.fm.get(file_id)["header"]
 
         # OpenFileAck
         # Create response object
@@ -695,7 +695,7 @@ class Session:
         else:
             layer = decode_tile_coord(tiles[0])[2]
             data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
-            image_shape = self.fm.get(file_id)[4]
+            image_shape = self.fm.get(file_id)["img_shape"]
             futures = {}
 
             for tile in tiles:
@@ -750,9 +750,8 @@ class Session:
 
         t0 = perf_counter_ns()
         tile_height, tile_width = data.shape
-        nan_encodings = await asyncio.to_thread(get_nan_encodings_block, data)
-        nan_encodings = nan_encodings.tobytes()
-        data = await asyncio.to_thread(fill_nan_with_block_average, data)
+        nan_encodings = get_nan_encodings_block(data).tobytes()
+        data = fill_nan_with_block_average(data)
         data = data.reshape(tile_height, tile_width)
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -764,8 +763,7 @@ class Session:
         # Compress data
         t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
-            comp_data = await asyncio.to_thread(
-                zfpy.compress_numpy,
+            comp_data = zfpy.compress_numpy(
                 data,
                 precision=compression_quality,
                 write_header=False)
@@ -825,7 +823,7 @@ class Session:
         # Set parameters
         tiles = list(tiles)
 
-        # RegionHistogramData
+        # # RegionHistogramData
         if not self.has_sent_histogram:
             await self.send_RegionHistogramData(
                 request_id,
@@ -846,6 +844,17 @@ class Session:
             channel=0,
             stokes=0
         )
+
+        # RegionHistogramData
+        # if not self.has_sent_histogram:
+        #     await self.send_RegionHistogramData(
+        #         request_id,
+        #         file_id,
+        #         region_id=-1,
+        #         channel=0,
+        #         stokes=0
+        #     )
+        #     self.has_sent_histogram = True
 
         return None
 
@@ -971,13 +980,16 @@ class Session:
         # spatial_requirements = obj.spatial_requirements
 
         # Check boundary
-        shape = self.fm.get(file_id)[4]
+        shape = self.fm.get(file_id)["img_shape"]
         x, y = int(point.x), int(point.y)
         if x < 0 or x >= shape[1] or y < 0 or y >= shape[0]:
             return None
 
         # Record cursor and read other parameters
         async with self.lock:
+            if file_id not in self.spat_dict:
+                # Return None if spatial requirement has not been set
+                return None
             self.cursor_dict[file_id] = [x, y]
             sprx = self.spat_dict[file_id]["x"]
             spry = self.spat_dict[file_id]["y"]
@@ -1098,7 +1110,7 @@ class Session:
 
         # Get data
         data = self.fm.get_slice(file_id, channel=None, stokes=0)
-        hdr = self.fm.get(file_id)[1]
+        hdr = self.fm.get(file_id)["header"]
 
         # Get spectral profile
         sp = CARTA.SpectralProfile()
