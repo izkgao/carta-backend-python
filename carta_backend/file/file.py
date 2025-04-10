@@ -95,8 +95,8 @@ class FileManager:
         return self.files[file_id]
 
     def get_slice(self, file_id, channel, stokes, time=0,
-                  layer=None, coarsen_func=da.nanmean):
-        name = f"{file_id}_{channel}_{stokes}_{time}_{layer}"
+                  layer=None, mip=None, coarsen_func=da.nanmean):
+        name = f"{file_id}_{channel}_{stokes}_{time}_{layer}_{mip}"
         if name in self.cache:
             return self.cache[name]
         else:
@@ -119,9 +119,9 @@ class FileManager:
                 image_shape=self.files[file_id]["img_shape"],
                 tile_shape=TILE_SHAPE)
 
-            if mip > 1:
-                data = da.coarsen(
-                    coarsen_func, data, {0: mip, 1: mip}, trim_excess=True)
+        if mip is not None and mip > 1:
+            data = da.coarsen(
+                coarsen_func, data, {0: mip, 1: mip}, trim_excess=True)
 
         self.cache[name] = data
         return data
