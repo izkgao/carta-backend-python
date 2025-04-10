@@ -24,6 +24,8 @@ pip install -e .
 
 ### Build protobuf
 
+This step can be skipped since the compiled protobuf files are already in `carta_backend/proto/`.
+
 ```bash
 ./build_proto.sh
 ```
