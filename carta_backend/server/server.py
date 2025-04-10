@@ -268,10 +268,10 @@ class Server:
         server = uvicorn.Server(config=config)
 
         try:
-            await asyncio.gather(
-                self.open_browser_when_ready(url) if open_browser else None,
-                server.serve()
-            )
+            tasks = [server.serve()]
+            if open_browser:
+                tasks.append(self.open_browser_when_ready(url))
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             pass
         finally:
