@@ -2,6 +2,7 @@ import astropy.io.fits as fits
 import dask
 import dask.array as da
 import numpy as np
+from astropy.nddata import block_reduce
 from astropy.wcs import WCS
 from xarray import open_zarr
 
@@ -68,6 +69,8 @@ class FileManager:
                     offset=offset,
                     chunks=chunks,
                 )
+
+            memmap = fits.getdata(file_path, hdu_index, memmap=True)
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr
             data = open_zarr(file_path)
@@ -77,6 +80,7 @@ class FileManager:
             msg += f"with chunking: {data.SKY.data.chunksize}"
             clog.debug(msg)
             frames = data
+            memmap = None
 
         self.files[file_id] = {
             "data": data,
@@ -84,7 +88,8 @@ class FileManager:
             "header": header,
             "file_type": file_type,
             "hdu_index": hdu_index,
-            "img_shape": img_shape
+            "img_shape": img_shape,
+            "memmap": memmap,
         }
 
     def get(self, file_id):
@@ -95,7 +100,8 @@ class FileManager:
         return self.files[file_id]
 
     def get_slice(self, file_id, channel, stokes, time=0,
-                  layer=None, mip=None, coarsen_func=da.nanmean):
+                  layer=None, mip=None, coarsen_func="nanmean",
+                  client=None, use_memmap=False):
         name = f"{file_id}_{channel}_{stokes}_{time}_{layer}_{mip}"
         if name in self.cache:
             return self.cache[name]
@@ -107,7 +113,10 @@ class FileManager:
                     del self.cache[key]
 
         if isinstance(channel, int):
-            data = self.files[file_id]["frames"]
+            if use_memmap and self.files[file_id]["memmap"] is not None:
+                data = self.files[file_id]["memmap"]
+            else:
+                data = self.files[file_id]["frames"]
         else:
             data = self.files[file_id]["data"]
 
@@ -120,8 +129,18 @@ class FileManager:
                 tile_shape=TILE_SHAPE)
 
         if mip is not None and mip > 1:
-            data = da.coarsen(
-                coarsen_func, data, {0: mip, 1: mip}, trim_excess=True)
+            if isinstance(data, da.Array):
+                data = da.coarsen(
+                    getattr(da, coarsen_func),
+                    data,
+                    {0: mip, 1: mip},
+                    trim_excess=True)
+            elif isinstance(data, np.ndarray):
+                data = block_reduce(
+                    data, (mip, mip), getattr(np, coarsen_func))
+
+        # if (data.nbytes / 1024**2 <= 128) and client is not None:
+        #     data = client.persist(data)
 
         self.cache[name] = data
         return data

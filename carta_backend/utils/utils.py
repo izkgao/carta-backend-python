@@ -576,7 +576,7 @@ def load_xradio_data(ds, channel=None, stokes=None, time=0):
 
 def load_data(data, channel=None, stokes=None, time=0) -> Optional[da.Array]:
     # Dask array from FITS
-    if isinstance(data, da.Array):
+    if isinstance(data, da.Array) or isinstance(data, np.ndarray):
         return load_fits_data(data, channel, stokes)
     # Xarary Dataset from Xradio
     elif isinstance(data, Dataset):

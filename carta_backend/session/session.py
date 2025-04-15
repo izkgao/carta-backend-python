@@ -604,7 +604,7 @@ class Session:
         """This only executes one time when the image is first loaded."""
         # Load image
         t0 = perf_counter_ns()
-        data = self.fm.get_slice(file_id, channel, stokes)
+        data = self.fm.get_slice(file_id, channel, stokes, client=self.client)
 
         if (data.nbytes / 1024**2) > 128:
             # If image is larger than 128MB, lazy load
@@ -1062,8 +1062,14 @@ class Session:
         t0 = perf_counter_ns()
 
         # Get data
-        data = self.fm.get_slice(file_id, channel, stokes, mip=mip)
         shape = self.fm.files[file_id]["img_shape"]
+        if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
+            use_memmap = True
+        else:
+            use_memmap = False
+        data = self.fm.get_slice(
+            file_id, channel, stokes, mip=mip, use_memmap=use_memmap)
+
         if mip > 1:
             mx = x // mip
             my = y // mip
