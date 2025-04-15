@@ -785,14 +785,14 @@ def pad_for_coarsen(darray, coarsen_factors):
     return padded_array
 
 
-@njit
-def fill_nan_with_block_average(data, offset=0):
+@njit(nb.float32[:](nb.float32[:, ::1]), fastmath=True)
+def fill_nan_with_block_average(data):
     h, w = data.shape
     data = data.ravel()
 
     for i in range(0, w, 4):
         for j in range(0, h, 4):
-            block_start = offset + j * w + i
+            block_start = j * w + i
             valid_count = 0
             sum_val = 0.0
 
