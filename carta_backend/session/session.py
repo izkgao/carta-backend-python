@@ -159,13 +159,16 @@ class Session:
         # self.task_group = asyncio.TaskGroup()
         # Send message asynchronously
         # self.task_group.create_task(self._send_message(res1))
-        self.priority_counter = itertools.count()
 
         # FileList
         self.flag_stop_file_list = False
 
         # Histogram
         self.has_sent_histogram = False
+
+        # Tiles
+        self.tile_futures = {}
+        self.priority_counter = itertools.count()
 
         # Channel & Stokes
         self.channel_stokes = [0, 0]
@@ -678,6 +681,17 @@ class Session:
 
         priority = next(self.priority_counter)
 
+        tile_count = 0
+
+        # Cancel futures with lower priority
+        # async with self.lock:
+        #     for p in list(self.tile_futures.keys()):
+        #         if p < priority:
+        #             for future in list(self.tile_futures[p].keys()):
+        #                 await future.cancel()
+        #                 del future
+        #             del self.tile_futures[p]
+
         # RasterTileData
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
@@ -692,6 +706,7 @@ class Session:
                 channel=channel,
                 stokes=stokes
             )
+            tile_count += 1
         else:
             layer = decode_tile_coord(tiles[0])[2]
             data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
@@ -704,6 +719,9 @@ class Session:
                 future = self.client.compute(
                     data[slicey, slicex], priority=priority)
                 futures[future] = (x, y, layer)
+
+            # async with self.lock:
+            #     self.tile_futures[priority] = futures
 
             async for future in as_completed(futures):
                 x, y, layer = futures[future]
@@ -719,12 +737,14 @@ class Session:
                     y=y,
                     layer=layer
                 )
+                tile_count += 1
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Get tile data group in {dt:.3f} ms"
         pflog.debug(msg)
 
         # RasterTileSync
+        resp_sync.tile_count = len(tiles)
         resp_sync.end_sync = True
 
         # Send message
@@ -931,6 +951,9 @@ class Session:
                 width = p.width
 
                 if (start == 0) and (end == 0):
+                    if mip != 0:
+                        to_send = True
+                        self.spat_dict[file_id][p.coordinate][2] = mip
                     if width == 0:
                         continue
                     else:
@@ -994,6 +1017,7 @@ class Session:
             sprx = self.spat_dict[file_id]["x"]
             spry = self.spat_dict[file_id]["y"]
             channel, stokes = self.channel_stokes
+            mip = sprx[2]
 
         # Send spatial profile data
         await self.send_SpatialProfileData(
@@ -1001,7 +1025,7 @@ class Session:
             file_id,
             slice_x=slice(sprx[0], sprx[1]),
             slice_y=slice(spry[0], spry[1]),
-            mip=sprx[2],
+            mip=mip,
             x=x,
             y=y,
             channel=channel,
@@ -1038,26 +1062,41 @@ class Session:
         t0 = perf_counter_ns()
 
         # Get data
-        data = self.fm.get_slice(file_id, channel, stokes)
+        data = self.fm.get_slice(file_id, channel, stokes, mip=mip)
+        shape = self.fm.files[file_id]["img_shape"]
+        if mip > 1:
+            mx = x // mip
+            my = y // mip
+            sx1 = slice_x.start // mip if slice_x.start is not None else None
+            sx2 = slice_x.stop // mip if slice_x.stop is not None else None
+            sy1 = slice_y.start // mip if slice_y.start is not None else None
+            sy2 = slice_y.stop // mip if slice_y.stop is not None else None
+            slice_x = slice(sx1, sx2)
+            slice_y = slice(sy1, sy2)
+        else:
+            mx = x
+            my = y
+            slice_x = slice(None, None)
+            slice_y = slice(None, None)
 
         # Check if x and y are valid and inside data
-        if y < 0 or y >= data.shape[0] or x < 0 or x >= data.shape[1]:
+        if my < 0 or my >= data.shape[0] or mx < 0 or mx >= data.shape[1]:
             return None
 
         if isinstance(data, da.Array):
             dres = self.client.compute([
-                data[y, x],
-                data[y, slice_x].astype('<f4'),
-                data[slice_y, x].astype('<f4')
+                data[my, mx],
+                data[my, slice_x].astype('<f4'),
+                data[slice_y, mx].astype('<f4')
             ])
             value, x_profile, y_profile = await asyncio.gather(*dres)
             value = float(value)
             x_profile = x_profile.tobytes()
             y_profile = y_profile.tobytes()
         else:
-            value = float(data[y, x])
-            x_profile = data[y, slice_x].astype('<f4').tobytes()
-            y_profile = data[slice_y, x].astype('<f4').tobytes()
+            value = float(data[my, mx])
+            x_profile = data[my, slice_x].astype('<f4').tobytes()
+            y_profile = data[slice_y, mx].astype('<f4').tobytes()
 
         resp = CARTA.SpatialProfileData()
         resp.file_id = file_id
@@ -1071,15 +1110,13 @@ class Session:
 
         sp = CARTA.SpatialProfile()
         sp.coordinate = "x"
-        sp.start = slice_x.start
-        sp.end = slice_x.stop if slice_x.stop is not None else data.shape[1]
+        sp.end = shape[1]
         sp.mip = mip
         sp.raw_values_fp32 = x_profile
         resp.profiles.append(sp)
 
         sp.coordinate = "y"
-        sp.start = slice_y.start
-        sp.end = slice_y.stop if slice_y.stop is not None else data.shape[0]
+        sp.end = shape[0]
         sp.mip = mip
         sp.raw_values_fp32 = y_profile
         resp.profiles.append(sp)
