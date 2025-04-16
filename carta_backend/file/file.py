@@ -1,3 +1,5 @@
+from time import perf_counter_ns
+
 import astropy.io.fits as fits
 import dask
 import dask.array as da
@@ -32,12 +34,17 @@ class FileManager:
 
         if file_type == CARTA.FileType.FITS:
             # Use memmap to read the file
+            t0 = perf_counter_ns()
             with fits.open(file_path, memmap=True) as hdul:
                 hdu = hdul[hdu_index]
                 dtype = np.dtype(hdu.data.dtype)
                 shape = hdu.data.shape
                 offset = hdu._data_offset
                 header = hdu.header
+            dt = (perf_counter_ns() - t0) / 1e6
+            msg = f"Read file info in {dt:.3f} ms"
+            clog.debug(msg)
+            t0 = perf_counter_ns()
             data = mmap_dask_array(
                 filename=file_path,
                 shape=shape,
@@ -45,6 +52,10 @@ class FileManager:
                 offset=offset,
                 chunks="auto",
             )
+            dt = (perf_counter_ns() - t0) / 1e6
+            msg = f"Create dask array in {dt:.3f} ms"
+            clog.debug(msg)
+            t0 = perf_counter_ns()
             wcs = WCS(header, fix=False)
             header["PIX_AREA"] = np.abs(np.linalg.det(
                 wcs.celestial.pixel_scale_matrix))
@@ -55,13 +66,16 @@ class FileManager:
 
             if data.ndim <= 2:
                 chunks = "auto"
-                frames = data
             elif data.ndim == 3:
                 chunks = {0: 1, 1: 1, 2: "auto"}
             elif data.ndim == 4:
                 chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
 
-            if chunks != "auto":
+            bitpix = abs(header["BITPIX"])
+            datasize = np.prod(data.shape[-2:]) * bitpix / 8 / 1024**2
+
+            if (chunks != "auto") and (datasize > 128):
+                t0 = perf_counter_ns()
                 frames = mmap_dask_array(
                     filename=file_path,
                     shape=shape,
@@ -69,7 +83,12 @@ class FileManager:
                     offset=offset,
                     chunks=chunks,
                 )
-
+                dt = (perf_counter_ns() - t0) / 1e6
+                msg = f"Create dask frame array in {dt:.3f} ms "
+                msg += f"with chunking: {frames.chunksize}"
+                clog.debug(msg)
+            else:
+                frames = data
             memmap = fits.getdata(file_path, hdu_index, memmap=True)
         elif file_type == CARTA.FileType.CASA:
             # Currently zarr
@@ -94,7 +113,7 @@ class FileManager:
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
-        if file_id not in self.files:
+        if file_id not in list(self.files.keys()):
             clog.error(f"File ID '{file_id}' not found.")
             return None
         return self.files[file_id]
@@ -141,6 +160,9 @@ class FileManager:
 
         # if (data.nbytes / 1024**2 <= 128) and client is not None:
         #     data = client.persist(data)
+
+        if isinstance(data, np.ndarray):
+            data = data.astype("float32")
 
         self.cache[name] = data
         return data
