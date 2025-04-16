@@ -53,11 +53,19 @@ def rasterize_chunk(block_data, block_info=None, region=None):
     if block_info is None:
         return block_data
 
+    block_mask = np.zeros(block_data.shape[-2:], dtype=np.uint8)
+
     xmin = block_info[0]['array-location'][-1][0]
+    xmax = xmin + block_data.shape[-1]
     ymin = block_info[0]['array-location'][-2][0]
+    ymax = ymin + block_data.shape[-2]
+    block_box = shapely.box(xmin, ymin, xmax, ymax)
+
+    # If block does not intersect with region
+    if not block_box.intersects(region):
+        return block_mask
 
     transform = from_origin(xmin, ymin, 1, -1)
-    block_mask = np.zeros(block_data.shape[-2:], dtype=np.uint8)
     rasterize([region], out=block_mask, transform=transform, all_touched=True)
     return block_mask
 
