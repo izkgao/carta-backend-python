@@ -1005,8 +1005,8 @@ class Session:
         if to_send:
             # Send spatial profile data
             await self.send_SpatialProfileData(
-                request_id,
-                file_id,
+                request_id=0,
+                file_id=file_id,
                 slice_x=slice(sprx[0], sprx[1]),
                 slice_y=slice(spry[0], spry[1]),
                 mip=sprx[2],
@@ -1046,8 +1046,8 @@ class Session:
 
         # Send spatial profile data
         await self.send_SpatialProfileData(
-            request_id,
-            file_id,
+            request_id=0,
+            file_id=file_id,
             slice_x=slice(sprx[0], sprx[1]),
             slice_y=slice(spry[0], spry[1]),
             mip=mip,
@@ -1060,8 +1060,8 @@ class Session:
         # Send spectral profile
         if self.spec_prof_cursor_on:
             await self.send_SpectroProfileData(
-                request_id,
-                file_id,
+                request_id=0,
+                file_id=file_id,
                 region_id=0,
                 x=x,
                 y=y,
@@ -1308,10 +1308,10 @@ class Session:
         # Send spectral profile
         if self.spec_prof_on or self.spec_prof_cursor_on:
             await self.send_SpectroProfileData(
-                request_id,
-                file_id,
-                region_id,
-                region_info,
+                request_id=0,
+                file_id=file_id,
+                region_id=region_id,
+                region_info=region_info,
                 stats_type=self.prev_stats_type,
                 x=x,
                 y=y
