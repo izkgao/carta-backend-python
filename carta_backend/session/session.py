@@ -207,8 +207,8 @@ class Session:
         self.client = await Client(
             address=self.dask_scheduler,
             asynchronous=True,
-            threads_per_worker=4,
-            n_workers=os.cpu_count() // 4
+            threads_per_worker=2,
+            n_workers=os.cpu_count() // 2
         )
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
@@ -570,10 +570,7 @@ class Session:
         self.file_path = file_path
 
         # Open file
-        if file_id not in self.fm.files:
-            async with self.lock:
-                self.fm.open(file_id, file_path, hdu_index)
-
+        self.fm.open(file_id, file_path, hdu_index)
         header = self.fm.get(file_id)["header"]
 
         # OpenFileAck
@@ -604,9 +601,15 @@ class Session:
         """This only executes one time when the image is first loaded."""
         # Load image
         t0 = perf_counter_ns()
-        data = self.fm.get_slice(file_id, channel, stokes, client=self.client)
+        shape = self.fm.files[file_id]["img_shape"]
+        if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
+            use_memmap = True
+        else:
+            use_memmap = False
+        data = self.fm.get_slice(
+            file_id, channel, stokes, use_memmap=use_memmap)
 
-        if (data.nbytes / 1024**2) > 128:
+        if not use_memmap:
             # If image is larger than 128MB, lazy load
             dt = (perf_counter_ns() - t0) / 1e6
             mpix_s = data.size / 1e6 / dt * 1000
@@ -615,7 +618,7 @@ class Session:
             clog.debug(msg)
         else:
             # If image is smaller than 128MB, load to cache
-            data = await self.client.compute(data)
+            data = data[:]
             dt = (perf_counter_ns() - t0) / 1e6
             mpix_s = data.size / 1e6 / dt * 1000
             msg = f"Load {data.shape[0]}x{data.shape[1]} image to "
@@ -696,7 +699,8 @@ class Session:
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
             data = self.fm.get_slice(file_id, channel, stokes)
-            data = await self.client.compute(data[:, :], priority=priority)
+            if isinstance(data, da.Array):
+                data = await self.client.compute(data[:, :], priority=priority)
             await self.send_RasterTileData(
                 request_id=request_id,
                 file_id=file_id,
@@ -711,33 +715,53 @@ class Session:
             layer = decode_tile_coord(tiles[0])[2]
             data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
             image_shape = self.fm.get(file_id)["img_shape"]
-            futures = {}
 
-            for tile in tiles:
-                x, y, layer = decode_tile_coord(tile)
-                slicey, slicex = get_tile_slice(x, y, layer, image_shape)
-                future = self.client.compute(
-                    data[slicey, slicex], priority=priority)
-                futures[future] = (x, y, layer)
+            if isinstance(data, da.Array):
+                futures = {}
 
-            # async with self.lock:
-            #     self.tile_futures[priority] = futures
+                for tile in tiles:
+                    x, y, layer = decode_tile_coord(tile)
+                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
+                    future = self.client.compute(
+                        data[slicey, slicex], priority=priority)
+                    futures[future] = (x, y, layer)
 
-            async for future in as_completed(futures):
-                x, y, layer = futures[future]
-                await self.send_RasterTileData(
-                    request_id=request_id,
-                    file_id=file_id,
-                    data=await future,
-                    compression_type=compression_type,
-                    compression_quality=compression_quality,
-                    channel=channel,
-                    stokes=stokes,
-                    x=x,
-                    y=y,
-                    layer=layer
-                )
-                tile_count += 1
+                # async with self.lock:
+                #     self.tile_futures[priority] = futures
+
+                async for future in as_completed(futures):
+                    x, y, layer = futures[future]
+                    await self.send_RasterTileData(
+                        request_id=request_id,
+                        file_id=file_id,
+                        data=await future,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        x=x,
+                        y=y,
+                        layer=layer
+                    )
+                    tile_count += 1
+            else:
+                for tile in tiles:
+                    x, y, layer = decode_tile_coord(tile)
+                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
+                    idata = data[slicey, slicex]
+                    await self.send_RasterTileData(
+                        request_id=request_id,
+                        file_id=file_id,
+                        data=idata,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        x=x,
+                        y=y,
+                        layer=layer
+                    )
+                    tile_count += 1
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Get tile data group in {dt:.3f} ms"
@@ -771,14 +795,22 @@ class Session:
         t0 = perf_counter_ns()
         tile_height, tile_width = data.shape
         nan_encodings = get_nan_encodings_block(data).tobytes()
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Get nan encodings in {dt:.3f} ms"
+        pflog.debug(msg)
+
+        # Fill NaNs
+        t0 = perf_counter_ns()
         data = fill_nan_with_block_average(data)
         data = data.reshape(tile_height, tile_width)
-
         dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Nearest neighbour filter {tile_width}x{tile_height} "
-        msg += f"raster data to {tile_width}x{tile_height} in "
-        msg += f"{dt:.3f} ms at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        msg = f"Fill NaN with block average in {dt:.3f} ms"
         pflog.debug(msg)
+
+        # msg = f"Nearest neighbour filter {tile_width}x{tile_height} "
+        # msg += f"raster data to {tile_width}x{tile_height} in "
+        # msg += f"{dt:.3f} ms at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        # pflog.debug(msg)
 
         # Compress data
         t0 = perf_counter_ns()
