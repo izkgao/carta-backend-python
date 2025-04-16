@@ -116,9 +116,11 @@ PROTO_FUNC_MAP = {
 
 EVENT_TYPE_MAP = {v: k for k, v in EventType.items()}
 
+ICD_VERSION = 30
+
 
 class Session:
-    # Add a mapping dict from event_id to method in Session
+    # Add a mapping dict from event_type to method in Session
     handler_map = {
         1: "do_RegisterViewer",
         2: "do_FileListRequest",
@@ -200,8 +202,8 @@ class Session:
         # This message should be encoded.
         await self.ws.send_bytes(message)
         # Get event info from received message
-        _, event_type = self.get_event_info(message)
-        ptlog.debug(f"[protocol] ==> {event_type}")
+        _, event_name = self.get_event_info(message)
+        ptlog.debug(f"[protocol] ==> {event_name}")
 
     async def start_dask_client(self) -> None:
         self.client = await Client(
@@ -226,13 +228,13 @@ class Session:
 
     async def take_action(self, message: bytes) -> None:
         # Get event info from received message
-        event_id, event_type = self.get_event_info(message)
-        ptlog.debug(f"[protocol] <== {event_type}")
+        event_type, event_name = self.get_event_info(message)
+        ptlog.debug(f"[protocol] <== {event_name}")
 
         # Get corresponding handler (e.g., do_FileListRequest)
-        handler = self.handler_map.get(event_id, None)
+        handler = self.handler_map.get(event_type, None)
         if handler is None:
-            ptlog.error(f"[protocol] No handler for event {event_type}")
+            ptlog.error(f"[protocol] No handler for event {event_name}")
             return None
 
         # Call handler
@@ -240,19 +242,20 @@ class Session:
         await handler(message)
 
     def get_event_info(self, message: bytes) -> Tuple[int, str]:
-        event_id = int.from_bytes(message[0:1], byteorder="little")
-        event_type = EVENT_TYPE_MAP.get(event_id, None)
-        return event_id, event_type
+        event_type = int.from_bytes(message[0:2], byteorder="little")
+        event_name = EVENT_TYPE_MAP.get(event_type, None)
+        return event_type, event_name
 
     def decode_message(
             self,
             message: bytes
     ) -> Optional[Tuple[int, int, Any]]:
 
-        event_id = int.from_bytes(message[0:1], byteorder="little")
-        request_id = int.from_bytes(message[1:8], byteorder="little")
+        event_type = int.from_bytes(message[0:2], byteorder="little")
+        # icd_version = int.from_bytes(message[2:4], byteorder="little")
+        request_id = int.from_bytes(message[4:8], byteorder="little")
 
-        func = PROTO_FUNC_MAP.get(event_id, None)
+        func = PROTO_FUNC_MAP.get(event_type, None)
 
         if func is None:
             return None
@@ -260,22 +263,23 @@ class Session:
         obj = func()
         obj.ParseFromString(message[8:])
 
-        return event_id, request_id, obj
+        return event_type, request_id, obj
 
     def encode_message(
             self,
-            event_id: int,
+            event_type: int,
             request_id: int,
             obj: Any
     ) -> bytes:
-        message = bytes([event_id])
-        message += request_id.to_bytes(7, byteorder="little")
+        message = event_type.to_bytes(2, byteorder="little")
+        message += ICD_VERSION.to_bytes(2, byteorder="little")
+        message += request_id.to_bytes(4, byteorder="little")
         message += obj.SerializeToString()
         return message
 
     async def do_template(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         pass
@@ -288,7 +292,7 @@ class Session:
 
     async def do_RegisterViewer(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         session_id = obj.session_id
@@ -329,8 +333,8 @@ class Session:
         self.mem_limit = mem_limit / 1024**3  # Gibibytes
 
         # Send message
-        event_id = EventType.REGISTER_VIEWER_ACK
-        message = self.encode_message(event_id, request_id, response)
+        event_type = EventType.REGISTER_VIEWER_ACK
+        message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
         return None
@@ -357,7 +361,7 @@ class Session:
         # Not implemented: ListProgress, CASA, DS9_REG, MIRIAD
 
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         directory = obj.directory
@@ -395,8 +399,8 @@ class Session:
             response.success = False
             msg = f"Directory '{directory}' is not accessible"
             response.message = msg
-            event_id = EventType.FILE_LIST_RESPONSE
-            message = self.encode_message(event_id, request_id, response)
+            event_type = EventType.FILE_LIST_RESPONSE
+            message = self.encode_message(event_type, request_id, response)
             await self.queue.put(message)
             return None
 
@@ -417,10 +421,10 @@ class Session:
                         response.subdirectories.extend(subdirectories)
                         response.success = False
                         response.cancel = True
-                        event_id = EventType.FILE_LIST_RESPONSE
+                        event_type = EventType.FILE_LIST_RESPONSE
                         # Encode message
                         message = self.encode_message(
-                            event_id, request_id, response)
+                            event_type, request_id, response)
                         # Send message
                         await self.queue.put(message)
                         return None
@@ -471,14 +475,14 @@ class Session:
             response.message = f"Error listing directory: {str(e)}"
             clog.error(f"Error in do_FileListRequest: {str(e)}")
 
-        event_id = EventType.FILE_LIST_RESPONSE
-        message = self.encode_message(event_id, request_id, response)
+        event_type = EventType.FILE_LIST_RESPONSE
+        message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
         return None
 
     async def do_StopFileList(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         # file_list_type = obj.file_list_type
@@ -491,7 +495,7 @@ class Session:
 
     async def do_FileInfoRequest(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         directory = obj.directory
@@ -528,14 +532,14 @@ class Session:
                     response.file_info_extended[k].CopyFrom(v)
 
         # Send message
-        event_id = EventType.FILE_INFO_RESPONSE
-        message = self.encode_message(event_id, request_id, response)
+        event_type = EventType.FILE_INFO_RESPONSE
+        message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
         return None
 
     async def do_CloseFile(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -549,7 +553,7 @@ class Session:
 
     async def do_OpenFile(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         directory = obj.directory
@@ -586,8 +590,8 @@ class Session:
         # response.beam_table
 
         # Send message
-        event_id = EventType.OPEN_FILE_ACK
-        message = self.encode_message(event_id, request_id, response)
+        event_type = EventType.OPEN_FILE_ACK
+        message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
     async def send_RegionHistogramData(
@@ -646,8 +650,8 @@ class Session:
         response.histograms.CopyFrom(histogram)
 
         # Send message
-        event_id = EventType.REGION_HISTOGRAM_DATA
-        message = self.encode_message(event_id, request_id, response)
+        event_type = EventType.REGION_HISTOGRAM_DATA
+        message = self.encode_message(event_type, request_id, response)
 
         dt = (perf_counter_ns() - t0) / 1e6
         mpix_s = data.size / 1e6 / dt * 1000
@@ -678,8 +682,8 @@ class Session:
         resp_sync.tile_count = len(tiles)
 
         # Send message
-        event_id = EventType.RASTER_TILE_SYNC
-        message = self.encode_message(event_id, request_id, resp_sync)
+        event_type = EventType.RASTER_TILE_SYNC
+        message = self.encode_message(event_type, request_id, resp_sync)
         await self.queue.put(message)
 
         priority = next(self.priority_counter)
@@ -772,8 +776,8 @@ class Session:
         resp_sync.end_sync = True
 
         # Send message
-        event_id = EventType.RASTER_TILE_SYNC
-        message = self.encode_message(event_id, request_id, resp_sync)
+        event_type = EventType.RASTER_TILE_SYNC
+        message = self.encode_message(event_type, request_id, resp_sync)
         await self.queue.put(message)
 
         return None
@@ -855,15 +859,15 @@ class Session:
         resp_data.tiles.append(tile)
 
         # Send message
-        event_id = EventType.RASTER_TILE_DATA
-        message = self.encode_message(event_id, request_id, resp_data)
+        event_type = EventType.RASTER_TILE_DATA
+        message = self.encode_message(event_type, request_id, resp_data)
         await self.queue.put(message)
 
         return None
 
     async def do_AddRequiredTiles(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -878,8 +882,8 @@ class Session:
         # # RegionHistogramData
         if not self.has_sent_histogram:
             await self.send_RegionHistogramData(
-                request_id,
-                file_id,
+                request_id=0,
+                file_id=file_id,
                 region_id=-1,
                 channel=0,
                 stokes=0
@@ -888,31 +892,20 @@ class Session:
 
         # RasterTile
         await self.send_RasterTileSync(
-            request_id,
-            file_id,
-            compression_type,
-            compression_quality,
+            request_id=0,
+            file_id=file_id,
+            compression_type=compression_type,
+            compression_quality=compression_quality,
             tiles=tiles,
             channel=0,
             stokes=0
         )
 
-        # RegionHistogramData
-        # if not self.has_sent_histogram:
-        #     await self.send_RegionHistogramData(
-        #         request_id,
-        #         file_id,
-        #         region_id=-1,
-        #         channel=0,
-        #         stokes=0
-        #     )
-        #     self.has_sent_histogram = True
-
         return None
 
     async def do_SetImageChannels(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         # Main obj
@@ -933,8 +926,8 @@ class Session:
 
         # RegionHistogramData
         await self.send_RegionHistogramData(
-            request_id,
-            file_id,
+            request_id=0,
+            file_id=file_id,
             region_id=-1,
             channel=channel,
             stokes=stokes
@@ -942,10 +935,10 @@ class Session:
 
         # RasterTile
         await self.send_RasterTileSync(
-            request_id,
-            file_id,
-            compression_type,
-            compression_quality,
+            request_id=0,
+            file_id=file_id,
+            compression_type=compression_type,
+            compression_quality=compression_quality,
             tiles=tiles,
             channel=channel,
             stokes=stokes
@@ -955,7 +948,7 @@ class Session:
 
     async def do_SetSpatialRequirements(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -1027,7 +1020,7 @@ class Session:
 
     async def do_SetCursor(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -1160,8 +1153,8 @@ class Session:
         resp.profiles.append(sp)
 
         # Send message
-        event_id = EventType.SPATIAL_PROFILE_DATA
-        message = self.encode_message(event_id, request_id, resp)
+        event_type = EventType.SPATIAL_PROFILE_DATA
+        message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -1214,8 +1207,8 @@ class Session:
         resp.profiles.append(sp)
 
         # Send message
-        event_id = EventType.SPECTRAL_PROFILE_DATA
-        message = self.encode_message(event_id, request_id, resp)
+        event_type = EventType.SPECTRAL_PROFILE_DATA
+        message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -1226,7 +1219,7 @@ class Session:
 
     async def do_SetRegion(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -1253,8 +1246,8 @@ class Session:
         resp = CARTA.SetRegionAck()
         resp.success = True
         resp.region_id = region_id
-        event_id = EventType.SET_REGION_ACK
-        message = self.encode_message(event_id, request_id, resp)
+        event_type = EventType.SET_REGION_ACK
+        message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 
         # Send spectral profile
@@ -1271,7 +1264,7 @@ class Session:
 
     async def do_SetSpectralRequirements(self, message: bytes) -> None:
         # Decode message
-        event_id, request_id, obj = self.decode_message(message)
+        event_type, request_id, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
