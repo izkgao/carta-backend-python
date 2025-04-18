@@ -110,7 +110,7 @@ def get_folder_size(path: str) -> int:
     return total_size
 
 
-def get_file_type(path: Union[str, Path]) -> CARTA.FileType:
+def get_file_type(path: Union[str, Path]) -> int:
     extension = os.path.splitext(path)[1].lower()
     if extension in ['.fits', '.fit', '.fts']:
         return CARTA.FileType.FITS
