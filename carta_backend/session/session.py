@@ -190,8 +190,9 @@ class Session:
 
     async def send_message_worker(self):
         """Continuously sends messages from the queue.
-        
-        This is a legacy method. Use get_message() instead for the new concurrent approach.
+
+        This is a legacy method. Use get_message() instead
+        for the new concurrent approach.
         """
         while True:
             message = await self.queue.get()
@@ -199,23 +200,23 @@ class Session:
             if message is None:
                 break
             await self._send_message(message)
-            
+
     async def get_message(self):
         """Get the next message from the queue.
-        
+
         This method is used by the concurrent WebSocket sender task.
-        
+
         Returns
         -------
         bytes or None
             The message bytes or None if the queue is closing
-        """        
+        """
         message = await self.queue.get()
         # Return None to signal end of messages
         if message is None:
             return None
-            
-        # No need to call _send_message as the server will handle sending directly
+        # No need to call _send_message as the server
+        # will handle sending directly
         return message
 
     async def _send_message(self, message):
@@ -223,7 +224,7 @@ class Session:
         await self.ws.send_bytes(message)
         # Get event info from received message
         _, event_name = self.get_event_info(message)
-        ptlog.debug(f"[protocol] ==> {event_name}")
+        ptlog.debug(f"<yellow>==> {event_name}</>")
 
     async def start_dask_client(self) -> None:
         self.client = await Client(
@@ -249,12 +250,12 @@ class Session:
     async def take_action(self, message: bytes) -> None:
         # Get event info from received message
         event_type, event_name = self.get_event_info(message)
-        ptlog.debug(f"[protocol] <== {event_name}")
+        ptlog.debug(f"<green><== {event_name}</>")
 
         # Get corresponding handler (e.g., do_FileListRequest)
         handler = self.handler_map.get(event_type, None)
         if handler is None:
-            ptlog.error(f"[protocol] No handler for event {event_name}")
+            ptlog.error(f"No handler for event {event_name}")
             return None
 
         # Call handler
