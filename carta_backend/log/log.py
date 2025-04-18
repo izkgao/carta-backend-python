@@ -16,6 +16,18 @@ VERBOSITY_LEVELS = {
 logger.remove()
 
 
+def formatter(record):
+    message = record["message"]
+    log_format = [
+            "[{time:YYYY-MM-DD HH:mm:ss.SSSZ}]",
+            "[{extra[name]}]",
+            "[<level>{level}</level>]",
+            message,
+            "\n{exception}"]
+    log_format = " ".join(log_format)
+    return log_format
+
+
 def configure_logger(file=None, rotation="5 MB", verbosity=4, no_log=False,
                      log_performance=False, log_protocol_messages=False):
     # Get log level
@@ -24,14 +36,6 @@ def configure_logger(file=None, rotation="5 MB", verbosity=4, no_log=False,
     level = VERBOSITY_LEVELS.get(verbosity, "INFO")
 
     if not (level == "OFF" or no_log):
-        # Set log format
-        log_format = [
-            "[{time:YYYY-MM-DD HH:mm:ss.SSSZ}]",
-            "[{extra[name]}]",
-            "[<level>{level}</level>]",
-            "{message}"]
-        log_format = " ".join(log_format)
-
         # Set log filters
         filt_list = []
         if not log_performance:
@@ -46,12 +50,12 @@ def configure_logger(file=None, rotation="5 MB", verbosity=4, no_log=False,
         logger.level("INFO", color="<green>")
 
         # Add stderr handler
-        logger.add(sys.stderr, level=level, format=log_format,
+        logger.add(sys.stderr, level=level, format=formatter,
                    filter=log_filter, enqueue=True)
 
         # Add file handler
         if file is not None:
-            logger.add(file, level=level, format=log_format, filter=log_filter,
+            logger.add(file, level=level, format=formatter, filter=log_filter,
                        rotation=rotation, enqueue=True)
 
 
