@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Tuple
+from weakref import WeakValueDictionary
 
 import astropy.io.fits as fits
 import dask
@@ -37,7 +38,7 @@ class FileData:
 class FileManager:
     def __init__(self):
         self.files = {}
-        self.cache = {}
+        self.cache = WeakValueDictionary()
 
     def open(self, file_id, file_path, hdu_index=None):
         if file_id in self.files:
