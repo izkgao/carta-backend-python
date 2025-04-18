@@ -164,9 +164,6 @@ class Session:
         # FileList
         self.flag_stop_file_list = False
 
-        # Histogram
-        self.has_sent_histogram = False
-
         # Tiles
         self.tile_futures = {}
         self.priority_counter = itertools.count()
@@ -546,8 +543,6 @@ class Session:
         # If file is open, close it
         self.fm.close(file_id)
 
-        self.has_sent_histogram = False
-
         return None
 
     async def do_OpenFile(self, message: bytes) -> None:
@@ -879,7 +874,8 @@ class Session:
         tiles = list(tiles)
 
         # # RegionHistogramData
-        if not self.has_sent_histogram:
+        has_hist = self.fm.files[file_id].hist_on
+        if not has_hist:
             await self.send_RegionHistogramData(
                 request_id=0,
                 file_id=file_id,
@@ -887,7 +883,7 @@ class Session:
                 channel=0,
                 stokes=0
             )
-            self.has_sent_histogram = True
+            self.fm.files[file_id].hist_on = True
 
         # RasterTile
         await self.send_RasterTileSync(

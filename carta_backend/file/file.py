@@ -31,6 +31,7 @@ class FileData:
     hdu_index: int
     img_shape: Tuple[int, int]
     memmap: np.ndarray | Dataset | None
+    hist_on: bool
 
 
 class FileManager:
@@ -122,6 +123,7 @@ class FileManager:
             hdu_index=hdu_index,
             img_shape=img_shape,
             memmap=memmap,
+            hist_on=False,
         )
 
     def get(self, file_id):
