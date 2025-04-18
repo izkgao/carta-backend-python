@@ -15,6 +15,7 @@ from starlette.websockets import WebSocket
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
+from carta_backend.config.config import ICD_VERSION
 from carta_backend.file import FileManager
 from carta_backend.log import logger
 from carta_backend.proto.enums_pb2 import EventType, SessionType
@@ -116,8 +117,6 @@ PROTO_FUNC_MAP = {
 
 EVENT_TYPE_MAP = {v: k for k, v in EventType.items()}
 
-ICD_VERSION = 30
-
 
 class Session:
     # Add a mapping dict from event_type to method in Session
@@ -209,8 +208,8 @@ class Session:
         self.client = await Client(
             address=self.dask_scheduler,
             asynchronous=True,
-            threads_per_worker=2,
-            n_workers=os.cpu_count() // 2
+            threads_per_worker=4,
+            n_workers=os.cpu_count() // 4
         )
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
