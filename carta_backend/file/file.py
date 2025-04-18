@@ -129,7 +129,7 @@ class FileManager:
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
-        if file_id not in list(self.files.keys()):
+        if file_id not in self.files:
             clog.error(f"File ID '{file_id}' not found.")
             return None
         return self.files[file_id]
