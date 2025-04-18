@@ -137,12 +137,18 @@ class FileManager:
     def get_slice(self, file_id, channel, stokes, time=0,
                   layer=None, mip=None, coarsen_func="nanmean",
                   client=None, use_memmap=False):
-        name = f"{file_id}_{channel}_{stokes}_{time}_{layer}_{mip}"
+        if layer is not None:
+            mip = layer_to_mip(
+                layer,
+                image_shape=self.files[file_id].img_shape,
+                tile_shape=TILE_SHAPE)
+
+        name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
         if name in self.cache:
             return self.cache[name]
         else:
-            # This means that the user is viewing another channel/stokes
-            # so we can clear the cache of previous channel/stokes
+            # This means that the user is viewing another channel/stokes/mip
+            # so we can clear the cache of previous channel/stokes/mip
             for key in list(self.cache.keys()):
                 if key.startswith(str(file_id)):
                     del self.cache[key]
@@ -156,12 +162,6 @@ class FileManager:
             data = self.files[file_id].data
 
         data = load_data(data, channel, stokes, time)
-
-        if layer is not None:
-            mip = layer_to_mip(
-                layer,
-                image_shape=self.files[file_id].img_shape,
-                tile_shape=TILE_SHAPE)
 
         if mip is not None and mip > 1:
             if isinstance(data, da.Array):
