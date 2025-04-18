@@ -574,7 +574,7 @@ class Session:
 
         # Open file
         self.fm.open(file_id, file_path, hdu_index)
-        header = self.fm.get(file_id)["header"]
+        header = self.fm.files[file_id].header
 
         # OpenFileAck
         # Create response object
@@ -604,7 +604,7 @@ class Session:
         """This only executes one time when the image is first loaded."""
         # Load image
         t0 = perf_counter_ns()
-        shape = self.fm.files[file_id]["img_shape"]
+        shape = self.fm.files[file_id].img_shape
         if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
             use_memmap = True
         else:
@@ -717,7 +717,7 @@ class Session:
         else:
             layer = decode_tile_coord(tiles[0])[2]
             data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
-            image_shape = self.fm.get(file_id)["img_shape"]
+            image_shape = self.fm.files[file_id].img_shape
 
             if isinstance(data, da.Array):
                 futures = {}
@@ -1027,7 +1027,7 @@ class Session:
         # spatial_requirements = obj.spatial_requirements
 
         # Check boundary
-        shape = self.fm.get(file_id)["img_shape"]
+        shape = self.fm.files[file_id].img_shape
         x, y = int(point.x), int(point.y)
         if x < 0 or x >= shape[1] or y < 0 or y >= shape[0]:
             return None
@@ -1086,7 +1086,7 @@ class Session:
         t0 = perf_counter_ns()
 
         # Get data
-        shape = self.fm.files[file_id]["img_shape"]
+        shape = self.fm.files[file_id].img_shape
         if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
             use_memmap = True
         else:
@@ -1177,7 +1177,7 @@ class Session:
 
         # Get data
         data = self.fm.get_slice(file_id, channel=None, stokes=0)
-        hdr = self.fm.get(file_id)["header"]
+        hdr = self.fm.files[file_id].header
 
         # Get spectral profile
         sp = CARTA.SpectralProfile()

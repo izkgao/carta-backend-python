@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from time import perf_counter_ns
+from typing import Tuple
 
 import astropy.io.fits as fits
 import dask
@@ -6,7 +8,7 @@ import dask.array as da
 import numpy as np
 from astropy.nddata import block_reduce
 from astropy.wcs import WCS
-from xarray import open_zarr
+from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
@@ -18,6 +20,17 @@ from carta_backend.utils import (get_file_type, get_header_from_xradio,
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
 ptlog = logger.bind(name="Protocol")
+
+
+@dataclass
+class FileData:
+    data: np.ndarray | da.Array | Dataset
+    frames: da.Array | None
+    header: fits.Header
+    file_type: int
+    hdu_index: int
+    img_shape: Tuple[int, int]
+    memmap: np.ndarray | Dataset | None
 
 
 class FileManager:
@@ -101,15 +114,15 @@ class FileManager:
             frames = data
             memmap = None
 
-        self.files[file_id] = {
-            "data": data,
-            "frames": frames,
-            "header": header,
-            "file_type": file_type,
-            "hdu_index": hdu_index,
-            "img_shape": img_shape,
-            "memmap": memmap,
-        }
+        self.files[file_id] = FileData(
+            data=data,
+            frames=frames,
+            header=header,
+            file_type=file_type,
+            hdu_index=hdu_index,
+            img_shape=img_shape,
+            memmap=memmap,
+        )
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
@@ -132,19 +145,19 @@ class FileManager:
                     del self.cache[key]
 
         if isinstance(channel, int):
-            if use_memmap and self.files[file_id]["memmap"] is not None:
-                data = self.files[file_id]["memmap"]
+            if use_memmap and self.files[file_id].memmap is not None:
+                data = self.files[file_id].memmap
             else:
-                data = self.files[file_id]["frames"]
+                data = self.files[file_id].frames
         else:
-            data = self.files[file_id]["data"]
+            data = self.files[file_id].data
 
         data = load_data(data, channel, stokes, time)
 
         if layer is not None:
             mip = layer_to_mip(
                 layer,
-                image_shape=self.files[file_id]["img_shape"],
+                image_shape=self.files[file_id].img_shape,
                 tile_shape=TILE_SHAPE)
 
         if mip is not None and mip > 1:
@@ -171,8 +184,8 @@ class FileManager:
         """Remove a file from the manager."""
         if file_id in self.files:
             clog.debug(f"Closing file ID '{file_id}'.")
-            if hasattr(self.files[file_id]["data"], "close"):
-                self.files[file_id]["data"].close()
+            if hasattr(self.files[file_id].data, "close"):
+                self.files[file_id].data.close()
             del self.files[file_id]
             # Clear cache
             for key in list(self.cache.keys()):
@@ -181,8 +194,8 @@ class FileManager:
         elif file_id == -1:
             for file_id in list(self.files.keys()):
                 clog.debug(f"Closing file ID '{file_id}'.")
-                if hasattr(self.files[file_id]["data"], "close"):
-                    self.files[file_id]["data"].close()
+                if hasattr(self.files[file_id].data, "close"):
+                    self.files[file_id].data.close()
                 del self.files[file_id]
                 # Clear cache
                 for key in list(self.cache.keys()):
