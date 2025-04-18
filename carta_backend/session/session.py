@@ -185,14 +185,38 @@ class Session:
         # Region
         self.region_dict = {}
 
+        # Task tokens for cursor movement
+        self.cursor_task_tokens = {}
+
     async def send_message_worker(self):
-        """Continuously sends messages from the queue."""
+        """Continuously sends messages from the queue.
+        
+        This is a legacy method. Use get_message() instead for the new concurrent approach.
+        """
         while True:
             message = await self.queue.get()
             # This is to close the sender task
             if message is None:
                 break
             await self._send_message(message)
+            
+    async def get_message(self):
+        """Get the next message from the queue.
+        
+        This method is used by the concurrent WebSocket sender task.
+        
+        Returns
+        -------
+        bytes or None
+            The message bytes or None if the queue is closing
+        """        
+        message = await self.queue.get()
+        # Return None to signal end of messages
+        if message is None:
+            return None
+            
+        # No need to call _send_message as the server will handle sending directly
+        return message
 
     async def _send_message(self, message):
         # This message should be encoded.
@@ -1039,6 +1063,10 @@ class Session:
             channel, stokes = self.channel_stokes
             mip = sprx[2]
 
+            # Generate a new cursor task token to identify this request
+            task_token = f"{file_id}_{x}_{y}_{perf_counter_ns()}"
+            self.cursor_task_tokens[file_id] = task_token
+
         # Send spatial profile data
         await self.send_SpatialProfileData(
             request_id=0,
@@ -1049,18 +1077,22 @@ class Session:
             x=x,
             y=y,
             channel=channel,
-            stokes=stokes
+            stokes=stokes,
+            task_token=task_token
         )
 
         # Send spectral profile
         if self.spec_prof_cursor_on:
-            await self.send_SpectroProfileData(
-                request_id=0,
-                file_id=file_id,
-                region_id=0,
-                x=x,
-                y=y,
-                stats_type=2
+            asyncio.create_task(
+                self.send_SpectroProfileData(
+                    request_id=0,
+                    file_id=file_id,
+                    region_id=0,
+                    x=x,
+                    y=y,
+                    stats_type=2,
+                    task_token=task_token
+                )
             )
 
         return None
@@ -1077,6 +1109,7 @@ class Session:
         channel: int,
         stokes: int,
         region_id: int = None,
+        task_token: str = None,
     ) -> None:
 
         t0 = perf_counter_ns()
@@ -1110,12 +1143,47 @@ class Session:
             return None
 
         if isinstance(data, da.Array):
-            dres = self.client.compute([
+            # Compute tasks
+            futures = self.client.compute([
                 data[my, mx],
                 data[my, slice_x].astype('<f4'),
                 data[slice_y, mx].astype('<f4')
             ])
-            value, x_profile, y_profile = await asyncio.gather(*dres)
+
+            # Check if this is still the current task before awaiting results
+            async with self.lock:
+                current_token = self.cursor_task_tokens.get(file_id)
+                if task_token is not None and current_token != task_token:
+                    # This task is no longer the current task
+                    # Cancel futures and abort
+                    msg = "Cancelling obsolete spatial profile "
+                    msg += f"calculation for {file_id}"
+                    pflog.debug(msg)
+                    for future in futures:
+                        future.cancel()
+                    return None
+
+            try:
+                # Await results (may raise if cancelled)
+                value, x_profile, y_profile = await asyncio.gather(*futures)
+
+                # Check again after computation in case cursor moved
+                # during computation
+                async with self.lock:
+                    current_token = self.cursor_task_tokens.get(file_id)
+                    if task_token is not None and current_token != task_token:
+                        # This task is no longer the current task, abort
+                        msg = "Discarding obsolete spatial profile "
+                        msg += f"results for {file_id}"
+                        pflog.debug(msg)
+                        return None
+            except Exception as e:
+                # Handle cancellation or other exceptions
+                msg = "Dask computation for spatial profile failed: "
+                msg += str(e)
+                pflog.debug(msg)
+                return None
+
             value = float(value)
             x_profile = x_profile.tobytes()
             y_profile = y_profile.tobytes()
@@ -1167,6 +1235,7 @@ class Session:
         x: int | None = None,
         y: int | None = None,
         stats_type: int = 2,
+        task_token: str = None,
     ) -> None:
 
         t0 = perf_counter_ns()
@@ -1182,16 +1251,74 @@ class Session:
 
         if region_id == 0:
             spec_profile = data[:, y, x].astype('<f4')
-            spec_profile = await self.client.compute(spec_profile)
+
+            # Check if this is still the current task before computation
+            async with self.lock:
+                current_token = self.cursor_task_tokens.get(file_id)
+                if task_token is not None and current_token != task_token:
+                    # This task is no longer the current task, abort
+                    msg = "Skipping obsolete spectral profile calculation for "
+                    msg += f"{file_id}"
+                    pflog.debug(msg)
+                    return None
+
+            # Compute the task and get future
+            future = self.client.compute(spec_profile)
+
+            # Check if still current task
+            async with self.lock:
+                current_token = self.cursor_task_tokens.get(file_id)
+                if task_token is not None and current_token != task_token:
+                    # This task is no longer the current task
+                    # Cancel future and abort
+                    msg = "Cancelling obsolete spectral profile "
+                    msg += f"calculation for {file_id}"
+                    pflog.debug(msg)
+                    future.cancel()
+                    return None
+
+            try:
+                # Await result (may raise if cancelled)
+                spec_profile = await future
+
+                # Check again after computation
+                async with self.lock:
+                    current_token = self.cursor_task_tokens.get(file_id)
+                    if task_token is not None and current_token != task_token:
+                        # This task is no longer the current task
+                        # Cancel future and abort
+                        msg = "Discarding obsolete spectral profile "
+                        msg += f"results for {file_id}"
+                        pflog.debug(msg)
+                        return None
+            except Exception as e:
+                # Handle cancellation or other exceptions
+                msg = "Dask computation for spectral profile failed: "
+                msg += str(e)
+                pflog.debug(msg)
+                return None
+
             sp.raw_values_fp32 = spec_profile.tobytes()
             msg_add = " cursor"
         else:
             region = get_region(region_info)
             spec_profile = get_spectral_profile_dask(
                 data, region, stats_type, hdr)
-            spec_profile = await self.client.compute(spec_profile)
-            sp.raw_values_fp64 = spec_profile.tobytes()
-            msg_add = ""
+
+            # Compute the task and get future
+            future = self.client.compute(spec_profile)
+
+            try:
+                # Await result
+                spec_profile = await future
+                sp.raw_values_fp64 = spec_profile.tobytes()
+                msg_add = ""
+            except Exception as e:
+                # Handle any exceptions
+                msg = "Dask computation for region spectral profile failed: "
+                msg += str(e)
+                pflog.debug(msg)
+                return None
 
         # Create response object
         resp = CARTA.SpectralProfileData()
