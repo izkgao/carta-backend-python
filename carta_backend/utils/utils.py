@@ -4,7 +4,7 @@ import platform
 import socket
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import dask.array as da
 import numba as nb
@@ -907,3 +907,9 @@ PROTO_FUNC_MAP = {
 }
 
 EVENT_TYPE_MAP = {v: k for k, v in EventType.items()}
+
+
+def get_event_info(message: bytes) -> Tuple[int, str]:
+    event_type = int.from_bytes(message[0:2], byteorder="little")
+    event_name = EVENT_TYPE_MAP.get(event_type, None)
+    return event_type, event_name
