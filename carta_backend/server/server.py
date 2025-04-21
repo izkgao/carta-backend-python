@@ -11,6 +11,7 @@ from starlette.websockets import WebSocket
 
 from carta_backend.log import logger
 from carta_backend.session import Session
+from carta_backend.utils import get_event_info
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -114,45 +115,40 @@ class Server:
         await websocket.accept()
         self.session.ws = websocket
 
-        # try:
-        #     while True:
-        #         message = await websocket.receive()
+        try:
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(self._websocket_receiver(websocket))
+                tg.create_task(self._websocket_sender(websocket))
+        except asyncio.CancelledError:
+            clog.debug("WebSocket receiver task was cancelled")
+        except Exception as e:
+            clog.error(f"WebSocket error: {e}")
+        finally:
+            if not websocket.client_state.DISCONNECTED:
+                await websocket.close()
+            clog.debug("WebSocket connection closed")
 
-        #         if "text" in message:
-        #             if message["text"] == "PING":
-        #                 await websocket.send_text("PONG")
-        #         elif "bytes" in message:
-        #             try:
-        #                 response = await self.session.take_action(
-        #                     message["bytes"]
-        #                 )
-        #             except Exception as e:
-        #                 clog.error(f"WebSocket error: {e}")
-        #                 response = None
-        #             if response is not None:
-        #                 await websocket.send_bytes(response)
-        #                 clog.debug(f"Sent message: {response}")
-        #         elif message.get("type") == "websocket.disconnect":
-        #             break
-
-        # except Exception as e:
-        #     clog.error(f"WebSocket error: {e}")
-
+    async def _websocket_receiver(self, websocket: WebSocket):
         while True:
             message = await websocket.receive()
-
             if "text" in message:
                 if message["text"] == "PING":
                     await websocket.send_text("PONG")
             elif "bytes" in message:
-                response = await self.session.take_action(
-                    message["bytes"]
-                )
-                if response is not None:
-                    await websocket.send_bytes(response)
-                    clog.debug(f"Sent message: {response}")
+                await self.session.take_action(message["bytes"])
             elif message.get("type") == "websocket.disconnect":
+                # Close session
+                await self.session.queue.put(None)
                 break
+
+    async def _websocket_sender(self, websocket: WebSocket):
+        while True:
+            message = await self.session.queue.get()
+            if message is None:
+                break
+            await websocket.send_bytes(message)
+            _, event_name = get_event_info(message)
+            ptlog.debug(f"<yellow>==> {event_name}</>")
 
     async def serve_root_file(self, request):
         """Serve files from the root directory.
