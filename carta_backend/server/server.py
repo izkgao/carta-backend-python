@@ -149,7 +149,7 @@ class Server:
                 if message["text"] == "PING":
                     await websocket.send_text("PONG")
             elif "bytes" in message:
-                await self.session.take_action(message["bytes"])
+                asyncio.create_task(self.session.take_action(message["bytes"]))
             elif message.get("type") == "websocket.disconnect":
                 # Close session
                 await self.session.queue.put(None)
