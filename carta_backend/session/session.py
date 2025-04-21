@@ -21,11 +21,10 @@ from carta_backend.log import logger
 from carta_backend.proto.enums_pb2 import EventType, SessionType
 from carta_backend.region import get_region, get_spectral_profile_dask
 from carta_backend.tile import get_tile_slice
-from carta_backend.utils import (EVENT_TYPE_MAP, PROTO_FUNC_MAP,
-                                 decode_tile_coord,
+from carta_backend.utils import (PROTO_FUNC_MAP, decode_tile_coord,
                                  fill_nan_with_block_average,
-                                 get_directory_info, get_file_info,
-                                 get_file_info_extended,
+                                 get_directory_info, get_event_info,
+                                 get_file_info, get_file_info_extended,
                                  get_header_from_xradio, get_histogram,
                                  get_nan_encodings_block, get_system_info)
 
@@ -71,11 +70,6 @@ class Session:
 
         # Set up message queue
         self.queue = asyncio.Queue()
-        self.sender_task = asyncio.create_task(self.send_message_worker())
-        # For concurrent processing (for future use)
-        # self.task_group = asyncio.TaskGroup()
-        # Send message asynchronously
-        # self.task_group.create_task(self._send_message(res1))
 
         # FileList
         self.flag_stop_file_list = False
@@ -104,44 +98,6 @@ class Session:
         # Task tokens for cursor movement
         self.cursor_task_tokens = {}
 
-    async def send_message_worker(self):
-        """Continuously sends messages from the queue.
-
-        This is a legacy method. Use get_message() instead
-        for the new concurrent approach.
-        """
-        while True:
-            message = await self.queue.get()
-            # This is to close the sender task
-            if message is None:
-                break
-            await self._send_message(message)
-
-    async def get_message(self):
-        """Get the next message from the queue.
-
-        This method is used by the concurrent WebSocket sender task.
-
-        Returns
-        -------
-        bytes or None
-            The message bytes or None if the queue is closing
-        """
-        message = await self.queue.get()
-        # Return None to signal end of messages
-        if message is None:
-            return None
-        # No need to call _send_message as the server
-        # will handle sending directly
-        return message
-
-    async def _send_message(self, message):
-        # This message should be encoded.
-        await self.ws.send_bytes(message)
-        # Get event info from received message
-        _, event_name = self.get_event_info(message)
-        ptlog.debug(f"<yellow>==> {event_name}</>")
-
     async def start_dask_client(self) -> None:
         self.client = await Client(
             address=self.dask_scheduler,
@@ -154,10 +110,6 @@ class Session:
         clog.info(f"Dask dashboard link: {self.client.dashboard_link}")
 
     async def close(self):
-        # Send stop signal to the sender task
-        await self.queue.put(None)
-        await self.sender_task
-
         # Close dask client
         if self.client is not None:
             await self.client.close()
@@ -165,7 +117,7 @@ class Session:
 
     async def take_action(self, message: bytes) -> None:
         # Get event info from received message
-        event_type, event_name = self.get_event_info(message)
+        event_type, event_name = get_event_info(message)
         ptlog.debug(f"<green><== {event_name}</>")
 
         # Get corresponding handler (e.g., do_FileListRequest)
@@ -177,11 +129,6 @@ class Session:
         # Call handler
         handler = getattr(self, handler)
         await handler(message)
-
-    def get_event_info(self, message: bytes) -> Tuple[int, str]:
-        event_type = int.from_bytes(message[0:2], byteorder="little")
-        event_name = EVENT_TYPE_MAP.get(event_type, None)
-        return event_type, event_name
 
     def decode_message(
             self,
