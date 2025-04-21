@@ -265,21 +265,7 @@ def main():
     except KeyboardInterrupt:
         clog.info("Exiting backend.")
     finally:
-        # asyncio.run(server.close())
         sys.exit(0)
-
-    # loop = asyncio.get_event_loop()
-
-    # try:
-    #     loop.run_until_complete(server.start(
-    #         open_browser=not args.no_browser,
-    #     ))
-    # except KeyboardInterrupt:
-    #     clog.info("Exiting backend.")
-    # finally:
-    #     loop.run_until_complete(server.close())
-    #     loop.close()
-    #     sys.exit(0)
 
 
 if __name__ == "__main__":
