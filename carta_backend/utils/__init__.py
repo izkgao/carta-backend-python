@@ -1,9 +1,9 @@
-from .utils import (async_load_xradio_data, decode_tile_coord,
-                    encode_tile_coord, fill_nan_with_block_average,
-                    get_computed_entries, get_directory_info, get_file_info,
-                    get_file_info_extended, get_file_type, get_header_entries,
-                    get_header_from_xradio, get_histogram,
-                    get_nan_encodings_block, get_system_info,
+from .utils import (EVENT_TYPE_MAP, PROTO_FUNC_MAP, async_load_xradio_data,
+                    decode_tile_coord, encode_tile_coord,
+                    fill_nan_with_block_average, get_computed_entries,
+                    get_directory_info, get_file_info, get_file_info_extended,
+                    get_file_type, get_header_entries, get_header_from_xradio,
+                    get_histogram, get_nan_encodings_block, get_system_info,
                     is_port_available, load_data, load_fits_data,
                     load_xradio_data, numba_histogram, pad_for_coarsen)
 
@@ -27,4 +27,6 @@ __all__ = [
     "get_file_type",
     "load_data",
     "pad_for_coarsen",
-    "fill_nan_with_block_average"]
+    "fill_nan_with_block_average",
+    "EVENT_TYPE_MAP",
+    "PROTO_FUNC_MAP"]
