@@ -1,6 +1,7 @@
 import asyncio
 import os
 import webbrowser
+from random import randint
 
 import uvicorn
 from dask.distributed import Client
@@ -123,7 +124,10 @@ class Server:
                 await asyncio.sleep(0.01)
             else:
                 break
-        self.session.ws = websocket
+
+        client_ip = websocket.client.host
+        msg = f"Session {self.session.session_id:09d} [{client_ip}] Connected."
+        clog.info(msg)
 
         try:
             async with asyncio.TaskGroup() as tg:
@@ -239,6 +243,7 @@ class Server:
         webbrowser.open(url)
 
     async def create_session(self):
+        session_id = randint(100000000, 999999999)
         while True:
             if self.client is None:
                 await asyncio.sleep(0.01)
@@ -248,6 +253,7 @@ class Server:
             lock=asyncio.Lock(),
             top_level_folder=self.top_level_folder,
             starting_folder=self.starting_folder,
+            session_id=session_id,
             client=self.client)
 
     async def start_dask_client(self):

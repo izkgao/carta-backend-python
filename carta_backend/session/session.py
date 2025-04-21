@@ -1,7 +1,6 @@
 import asyncio
 import itertools
 import os
-import random
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, Optional, Tuple
@@ -11,7 +10,6 @@ import numpy as np
 import zfpy
 from astropy.io import fits
 from dask.distributed import Client, as_completed
-from starlette.websockets import WebSocket
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
@@ -55,14 +53,12 @@ class Session:
             top_level_folder: str = None,
             starting_folder: str = None,
             lock: asyncio.Lock = None,
-            ws: WebSocket = None,
             client: Client = None,
     ):
         self.session_id = session_id
         self.top_level_folder = Path(top_level_folder)
         self.starting_folder = Path(starting_folder)
         self.lock = lock or asyncio.Lock()
-        self.ws = ws
         self.client = client
         self.fm = FileManager()
 
@@ -174,11 +170,6 @@ class Session:
         response = CARTA.RegisterViewerAck()
 
         if session_id == 0:
-            # Create a new session
-            # Generate a nine digit session ID
-            session_id = random.randint(100000000, 999999999)
-            async with self.lock:
-                self.session_id = session_id
             response.session_id = session_id
             response.success = True
             response.message = ""
@@ -189,10 +180,6 @@ class Session:
             # Not implemented
             response.success = False
             response.message = "Not implemented"
-
-        client_ip = self.ws.client.host
-        msg = f"Session {self.session_id:09d} [{client_ip}] Connected."
-        clog.info(msg)
 
         # Get client info
         worker_info = self.client.cluster.scheduler_info['workers']
