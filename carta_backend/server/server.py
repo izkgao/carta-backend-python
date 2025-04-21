@@ -3,6 +3,7 @@ import os
 import webbrowser
 
 import uvicorn
+from dask.distributed import Client
 from starlette.applications import Starlette
 from starlette.responses import FileResponse
 from starlette.routing import Mount, Route, WebSocketRoute
@@ -69,6 +70,9 @@ class Server:
         self.starting_folder = starting_folder
         self.dask_scheduler = dask_scheduler
 
+        self.client = None
+        self.session = None
+
     async def http_endpoint(self, request):
         """Serve the main HTML file.
 
@@ -113,6 +117,12 @@ class Server:
                 return
 
         await websocket.accept()
+
+        while True:
+            if self.session is None:
+                await asyncio.sleep(0.01)
+            else:
+                break
         self.session.ws = websocket
 
         try:
@@ -223,10 +233,37 @@ class Server:
                 clog.debug(msg)
                 break
             except (OSError, ConnectionRefusedError):
-                await asyncio.sleep(0.5)  # Retry after 0.5 sec
+                await asyncio.sleep(0.01)
 
         # Open the browser once the server is ready
         webbrowser.open(url)
+
+    async def create_session(self):
+        while True:
+            if self.client is None:
+                await asyncio.sleep(0.01)
+            else:
+                break
+        self.session = Session(
+            lock=asyncio.Lock(),
+            top_level_folder=self.top_level_folder,
+            starting_folder=self.starting_folder,
+            client=self.client)
+
+    async def start_dask_client(self):
+        if self.dask_scheduler is None:
+            self.client = await Client(
+                asynchronous=True,
+                threads_per_worker=4,
+                n_workers=os.cpu_count() // 4
+            )
+        else:
+            self.client = await Client(
+                address=self.dask_scheduler
+            )
+        clog.info("Dask client started.")
+        clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
+        clog.info(f"Dask dashboard link: {self.client.dashboard_link}")
 
     async def start(self, open_browser=True, enable_uvicorn_logs=False):
         """Start the Starlette server to serve the frontend application.
@@ -242,13 +279,6 @@ class Server:
         -------
         None
         """
-        # Initialize session with async components
-        self.session = Session(
-            lock=asyncio.Lock(),
-            top_level_folder=self.top_level_folder,
-            starting_folder=self.starting_folder,
-            dask_scheduler=self.dask_scheduler)
-
         app = self.create_app()
 
         url = f"http://{self.host}:{self.port}/"
@@ -261,21 +291,17 @@ class Server:
             config = uvicorn.Config(
                 app, host=self.host, port=self.port, log_config=None
             )
+
         server = uvicorn.Server(config=config)
 
         try:
-            tasks = [server.serve()]
-            if open_browser:
-                tasks.append(self.open_browser_when_ready(url))
-            await asyncio.gather(*tasks)
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(server.serve())
+                if open_browser:
+                    tg.create_task(self.open_browser_when_ready(url))
+                tg.create_task(self.create_session())
+                tg.create_task(self.start_dask_client())
         except KeyboardInterrupt:
             pass
         finally:
-            # When KeyboardInterrupt is received, it ends with showing
-            # "RuntimeWarning: coroutine 'wait_for' was never awaited"
-            # "RuntimeWarning: coroutine 'Client._close' was never awaited"
-            # from dask client. I tried different ways to close the dask client
-            # but it did not work. And I accidentally tried this. I do not know
-            # why this works without showing any RuntimeWarnings, but it works.
-            # Note that there is no close method in this class.
-            await self.close()
+            raise KeyboardInterrupt

@@ -56,7 +56,6 @@ class Session:
             starting_folder: str = None,
             lock: asyncio.Lock = None,
             ws: WebSocket = None,
-            dask_scheduler: str = None,
             client: Client = None,
     ):
         self.session_id = session_id
@@ -64,7 +63,6 @@ class Session:
         self.starting_folder = Path(starting_folder)
         self.lock = lock or asyncio.Lock()
         self.ws = ws
-        self.dask_scheduler = dask_scheduler
         self.client = client
         self.fm = FileManager()
 
@@ -97,17 +95,6 @@ class Session:
 
         # Task tokens for cursor movement
         self.cursor_task_tokens = {}
-
-    async def start_dask_client(self) -> None:
-        self.client = await Client(
-            address=self.dask_scheduler,
-            asynchronous=True,
-            threads_per_worker=4,
-            n_workers=os.cpu_count() // 4
-        )
-        clog.info("Dask client started.")
-        clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
-        clog.info(f"Dask dashboard link: {self.client.dashboard_link}")
 
     async def close(self):
         # Close dask client
@@ -206,10 +193,6 @@ class Session:
         client_ip = self.ws.client.host
         msg = f"Session {self.session_id:09d} [{client_ip}] Connected."
         clog.info(msg)
-
-        # Start Dask client if not started
-        if self.client is None:
-            await self.start_dask_client()
 
         # Get client info
         worker_info = self.client.cluster.scheduler_info['workers']
