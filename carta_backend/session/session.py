@@ -1089,12 +1089,12 @@ class Session:
             # Check if this is still the current task before computation
             async with self.lock:
                 current_token = self.cursor_task_tokens.get(file_id)
-                if task_token is not None and current_token != task_token:
-                    # This task is no longer the current task, abort
-                    msg = "Skipping obsolete spectral profile calculation for "
-                    msg += f"{file_id}"
-                    pflog.debug(msg)
-                    return None
+            if task_token is not None and current_token != task_token:
+                # This task is no longer the current task, abort
+                msg = "Skipping obsolete spectral profile calculation for "
+                msg += f"{file_id}"
+                pflog.debug(msg)
+                return None
 
             # Compute the task and get future
             future = self.client.compute(spec_profile)
@@ -1102,14 +1102,14 @@ class Session:
             # Check if still current task
             async with self.lock:
                 current_token = self.cursor_task_tokens.get(file_id)
-                if task_token is not None and current_token != task_token:
-                    # This task is no longer the current task
-                    # Cancel future and abort
-                    msg = "Cancelling obsolete spectral profile "
-                    msg += f"calculation for {file_id}"
-                    pflog.debug(msg)
-                    future.cancel()
-                    return None
+            if task_token is not None and current_token != task_token:
+                # This task is no longer the current task
+                # Cancel future and abort
+                msg = "Cancelling obsolete spectral profile "
+                msg += f"calculation for {file_id}"
+                pflog.debug(msg)
+                future.cancel()
+                return None
 
             try:
                 # Await result (may raise if cancelled)
@@ -1118,13 +1118,13 @@ class Session:
                 # Check again after computation
                 async with self.lock:
                     current_token = self.cursor_task_tokens.get(file_id)
-                    if task_token is not None and current_token != task_token:
-                        # This task is no longer the current task
-                        # Cancel future and abort
-                        msg = "Discarding obsolete spectral profile "
-                        msg += f"results for {file_id}"
-                        pflog.debug(msg)
-                        return None
+                if task_token is not None and current_token != task_token:
+                    # This task is no longer the current task
+                    # Cancel future and abort
+                    msg = "Discarding obsolete spectral profile "
+                    msg += f"results for {file_id}"
+                    pflog.debug(msg)
+                    return None
             except Exception as e:
                 # Handle cancellation or other exceptions
                 msg = "Dask computation for spectral profile failed: "
