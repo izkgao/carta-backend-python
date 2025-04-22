@@ -587,20 +587,6 @@ def load_data(data, channel=None, stokes=None, time=0) -> Optional[da.Array]:
         return None
 
 
-# @njit(nb.int64[:](nb.float32[:], nb.int64, nb.float64, nb.float64))
-# def numba_histogram(data, bins, bin_min, bin_max):
-#     hist = np.zeros(bins, dtype=np.int64)
-#     bin_width = (bin_max - bin_min) / bins
-
-#     for x in data:
-#         if not np.isnan(x) and bin_min <= x <= bin_max:
-#             bin_idx = int((x - bin_min) / bin_width)
-#             bin_idx = min(hist.size - 1, bin_idx)
-#             hist[bin_idx] += 1
-
-#     return hist
-
-
 @njit(nb.int64[:](nb.float32[:], nb.float32[:]))
 def numba_histogram_single(data, bin_edges):
     # Precompute constants
