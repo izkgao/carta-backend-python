@@ -211,6 +211,25 @@ class Server:
         )
         return app
 
+    def get_url(self):
+        url = f"http://{self.host}:{self.port}/"
+        if self.token:
+            url += f"?token={self.token}"
+        return url
+
+    def create_server(self, enable_uvicorn_logs=False):
+        app = self.create_app()
+
+        if enable_uvicorn_logs:
+            config = uvicorn.Config(app, host=self.host, port=self.port)
+        else:
+            config = uvicorn.Config(
+                app, host=self.host, port=self.port, log_config=None
+            )
+
+        server = uvicorn.Server(config=config)
+        return server
+
     async def open_browser_when_ready(self, url):
         """Wait for the server to start before opening the browser.
 
@@ -285,28 +304,17 @@ class Server:
         -------
         None
         """
-        app = self.create_app()
-
-        url = f"http://{self.host}:{self.port}/"
-        if self.token:
-            url += f"?token={self.token}"
-
-        if enable_uvicorn_logs:
-            config = uvicorn.Config(app, host=self.host, port=self.port)
-        else:
-            config = uvicorn.Config(
-                app, host=self.host, port=self.port, log_config=None
-            )
-
-        server = uvicorn.Server(config=config)
+        server = self.create_server(enable_uvicorn_logs)
+        url = self.get_url()
 
         try:
             async with asyncio.TaskGroup() as tg:
+                tg.create_task(self.start_dask_client())
                 tg.create_task(server.serve())
                 if open_browser:
                     tg.create_task(self.open_browser_when_ready(url))
                 tg.create_task(self.create_session())
-                tg.create_task(self.start_dask_client())
+
         except KeyboardInterrupt:
             pass
         finally:
