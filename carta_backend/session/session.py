@@ -18,8 +18,8 @@ from carta_backend.file import (FileManager, get_directory_info, get_file_info,
                                 get_file_info_extended, get_header_from_xradio)
 from carta_backend.log import logger
 from carta_backend.region import get_region, get_spectral_profile_dask
-from carta_backend.tile import (decode_tile_coord, fill_nan_with_block_average,
-                                get_nan_encodings_block, get_tile_slice)
+from carta_backend.tile import (decode_tile_coord, get_nan_encodings_block,
+                                get_tile_slice)
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
 clog = logger.bind(name="CARTA")
@@ -182,9 +182,13 @@ class Session:
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
-        # Import (compile numba functions here)
+        # Import (compile) numba functions here
+        # This block is good for doing time-consuming tasks
+        # and the performance will not be affected.
+        from carta_backend.tile.utils import fill_nan_with_block_average
         from carta_backend.utils.histogram import get_histogram
         self.get_histogram = get_histogram
+        self.fill_nan_with_block_average = fill_nan_with_block_average
         return None
 
     async def do_FileListRequest(self, message: bytes) -> None:
@@ -655,7 +659,7 @@ class Session:
 
         # Fill NaNs
         t0 = perf_counter_ns()
-        data = fill_nan_with_block_average(data.astype(np.float32))
+        data = self.fill_nan_with_block_average(data.astype(np.float32))
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Fill NaN with block average in {dt:.3f} ms"
         pflog.debug(msg)
