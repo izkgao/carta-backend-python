@@ -134,13 +134,13 @@ class Server:
                 tg.create_task(self._websocket_receiver(websocket))
                 tg.create_task(self._websocket_sender(websocket))
         except asyncio.CancelledError:
-            clog.debug("WebSocket receiver task was cancelled")
+            clog.debug("WebSocket receiver task was cancelled.")
         except Exception as e:
             clog.error(f"WebSocket error: {e}")
         finally:
             if not websocket.client_state.DISCONNECTED:
                 await websocket.close()
-            clog.debug("WebSocket connection closed")
+            clog.debug("WebSocket connection closed.")
 
     async def _websocket_receiver(self, websocket: WebSocket):
         while True:
