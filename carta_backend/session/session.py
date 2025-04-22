@@ -14,17 +14,14 @@ from xarray import open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import ICD_VERSION
-from carta_backend.file import FileManager
+from carta_backend.file import (FileManager, get_directory_info, get_file_info,
+                                get_file_info_extended, get_header_from_xradio)
 from carta_backend.log import logger
-from carta_backend.proto.enums_pb2 import EventType, SessionType
 from carta_backend.region import get_region, get_spectral_profile_dask
-from carta_backend.tile import get_tile_slice
-from carta_backend.utils import (PROTO_FUNC_MAP, decode_tile_coord,
-                                 fill_nan_with_block_average,
-                                 get_directory_info, get_event_info,
-                                 get_file_info, get_file_info_extended,
-                                 get_header_from_xradio, get_histogram,
-                                 get_nan_encodings_block, get_system_info)
+from carta_backend.tile import (decode_tile_coord, fill_nan_with_block_average,
+                                get_nan_encodings_block, get_tile_slice)
+from carta_backend.utils import (PROTO_FUNC_MAP, get_event_info, get_histogram,
+                                 get_system_info)
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -173,7 +170,7 @@ class Session:
             response.session_id = session_id
             response.success = True
             response.message = ""
-            response.session_type = SessionType.NEW
+            response.session_type = CARTA.SessionType.NEW
             response.platform_strings.update(get_system_info())
         else:
             # Resume an existing session
@@ -182,7 +179,7 @@ class Session:
             response.message = "Not implemented"
 
         # Send message
-        event_type = EventType.REGISTER_VIEWER_ACK
+        event_type = CARTA.EventType.REGISTER_VIEWER_ACK
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
@@ -248,7 +245,7 @@ class Session:
             response.success = False
             msg = f"Directory '{directory}' is not accessible"
             response.message = msg
-            event_type = EventType.FILE_LIST_RESPONSE
+            event_type = CARTA.EventType.FILE_LIST_RESPONSE
             message = self.encode_message(event_type, request_id, response)
             await self.queue.put(message)
             return None
@@ -270,7 +267,7 @@ class Session:
                         response.subdirectories.extend(subdirectories)
                         response.success = False
                         response.cancel = True
-                        event_type = EventType.FILE_LIST_RESPONSE
+                        event_type = CARTA.EventType.FILE_LIST_RESPONSE
                         # Encode message
                         message = self.encode_message(
                             event_type, request_id, response)
@@ -324,7 +321,7 @@ class Session:
             response.message = f"Error listing directory: {str(e)}"
             clog.error(f"Error in do_FileListRequest: {str(e)}")
 
-        event_type = EventType.FILE_LIST_RESPONSE
+        event_type = CARTA.EventType.FILE_LIST_RESPONSE
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
         return None
@@ -381,7 +378,7 @@ class Session:
                     response.file_info_extended[k].CopyFrom(v)
 
         # Send message
-        event_type = EventType.FILE_INFO_RESPONSE
+        event_type = CARTA.EventType.FILE_INFO_RESPONSE
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
         return None
@@ -437,7 +434,7 @@ class Session:
         # response.beam_table
 
         # Send message
-        event_type = EventType.OPEN_FILE_ACK
+        event_type = CARTA.EventType.OPEN_FILE_ACK
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
@@ -497,7 +494,7 @@ class Session:
         response.histograms.CopyFrom(histogram)
 
         # Send message
-        event_type = EventType.REGION_HISTOGRAM_DATA
+        event_type = CARTA.EventType.REGION_HISTOGRAM_DATA
         message = self.encode_message(event_type, request_id, response)
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -531,7 +528,7 @@ class Session:
         resp_sync.tile_count = len(tiles)
 
         # Send message
-        event_type = EventType.RASTER_TILE_SYNC
+        event_type = CARTA.EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_type, request_id, resp_sync)
         await self.queue.put(message)
 
@@ -627,7 +624,7 @@ class Session:
         resp_sync.end_sync = True
 
         # Send message
-        event_type = EventType.RASTER_TILE_SYNC
+        event_type = CARTA.EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_type, request_id, resp_sync)
         await self.queue.put(message)
 
@@ -710,7 +707,7 @@ class Session:
         resp_data.tiles.append(tile)
 
         # Send message
-        event_type = EventType.RASTER_TILE_DATA
+        event_type = CARTA.EventType.RASTER_TILE_DATA
         message = self.encode_message(event_type, request_id, resp_data)
         await self.queue.put(message)
 
@@ -1049,7 +1046,7 @@ class Session:
         resp.profiles.append(sp)
 
         # Send message
-        event_type = EventType.SPATIAL_PROFILE_DATA
+        event_type = CARTA.EventType.SPATIAL_PROFILE_DATA
         message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 
@@ -1162,7 +1159,7 @@ class Session:
         resp.profiles.append(sp)
 
         # Send message
-        event_type = EventType.SPECTRAL_PROFILE_DATA
+        event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
         message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 
@@ -1201,7 +1198,7 @@ class Session:
         resp = CARTA.SetRegionAck()
         resp.success = True
         resp.region_id = region_id
-        event_type = EventType.SET_REGION_ACK
+        event_type = CARTA.EventType.SET_REGION_ACK
         message = self.encode_message(event_type, request_id, resp)
         await self.queue.put(message)
 

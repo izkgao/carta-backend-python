@@ -13,7 +13,7 @@ from starlette.websockets import WebSocket
 
 from carta_backend.log import logger
 from carta_backend.session import Session
-from carta_backend.utils import get_event_info
+from carta_backend.utils.utils import get_event_info
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")

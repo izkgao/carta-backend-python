@@ -13,10 +13,10 @@ from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
+from carta_backend.file.utils import (get_file_type, get_header_from_xradio,
+                                      load_data)
 from carta_backend.log import logger
-from carta_backend.tile import layer_to_mip
-from carta_backend.utils import (get_file_type, get_header_from_xradio,
-                                 load_data)
+from carta_backend.tile.utils import layer_to_mip
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -48,84 +48,11 @@ class FileManager:
         file_type = get_file_type(file_path)
 
         if file_type == CARTA.FileType.FITS:
-            # Use memmap to read the file
-            t0 = perf_counter_ns()
-            with fits.open(file_path, memmap=True) as hdul:
-                hdu = hdul[hdu_index]
-                dtype = np.dtype(hdu.data.dtype)
-                shape = hdu.data.shape
-                offset = hdu._data_offset
-                header = hdu.header
-            dt = (perf_counter_ns() - t0) / 1e6
-            msg = f"Read file info in {dt:.3f} ms"
-            clog.debug(msg)
-            t0 = perf_counter_ns()
-            data = mmap_dask_array(
-                filename=file_path,
-                shape=shape,
-                dtype=dtype,
-                offset=offset,
-                chunks="auto",
-            )
-            dt = (perf_counter_ns() - t0) / 1e6
-            msg = f"Create dask array in {dt:.3f} ms"
-            clog.debug(msg)
-            t0 = perf_counter_ns()
-            wcs = WCS(header, fix=False)
-            header["PIX_AREA"] = np.abs(np.linalg.det(
-                wcs.celestial.pixel_scale_matrix))
-            img_shape = shape[-2:]
-            msg = f"File ID '{file_id}' of shape {shape} opened "
-            msg += f"with chunking: {data.chunksize}"
-            clog.debug(msg)
-
-            if data.ndim <= 2:
-                chunks = "auto"
-            elif data.ndim == 3:
-                chunks = {0: 1, 1: 1, 2: "auto"}
-            elif data.ndim == 4:
-                chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
-
-            bitpix = abs(header["BITPIX"])
-            datasize = np.prod(data.shape[-2:]) * bitpix / 8 / 1024**2
-
-            if (chunks != "auto") and (datasize > 128):
-                t0 = perf_counter_ns()
-                frames = mmap_dask_array(
-                    filename=file_path,
-                    shape=shape,
-                    dtype=dtype,
-                    offset=offset,
-                    chunks=chunks,
-                )
-                dt = (perf_counter_ns() - t0) / 1e6
-                msg = f"Create dask frame array in {dt:.3f} ms "
-                msg += f"with chunking: {frames.chunksize}"
-                clog.debug(msg)
-            else:
-                frames = data
-            memmap = fits.getdata(file_path, hdu_index, memmap=True)
+            filedata = get_fits_FileData(file_id, file_path, hdu_index)
         elif file_type == CARTA.FileType.CASA:
-            # Currently zarr
-            data = open_zarr(file_path)
-            header = get_header_from_xradio(data)
-            img_shape = [data.sizes['m'], data.sizes['l']]
-            msg = f"File ID '{file_id}' of shape {data.sizes.mapping} opened "
-            msg += f"with chunking: {data.SKY.data.chunksize}"
-            clog.debug(msg)
-            frames = data
-            memmap = None
+            filedata = get_zarr_FileData(file_id, file_path)
 
-        self.files[file_id] = FileData(
-            data=data,
-            frames=frames,
-            header=header,
-            file_type=file_type,
-            hdu_index=hdu_index,
-            img_shape=img_shape,
-            memmap=memmap,
-            hist_on=False,
-        )
+        self.files[file_id] = filedata
 
     def get(self, file_id):
         """Retrieve an opened file's data and header."""
@@ -322,3 +249,115 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
 
     # Combine all blocks using da.block
     return da.block(nested_blocks)
+
+
+def get_fits_FileData(file_id, file_path, hdu_index):
+    t0 = perf_counter_ns()
+
+    # Read file information
+    with fits.open(file_path, memmap=True) as hdul:
+        hdu = hdul[hdu_index]
+        dtype = np.dtype(hdu.data.dtype)
+        shape = hdu.data.shape
+        offset = hdu._data_offset
+        header = hdu.header
+
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Read file info in {dt:.3f} ms"
+    clog.debug(msg)
+
+    t0 = perf_counter_ns()
+
+    # Read file as dask array
+    data = mmap_dask_array(
+        filename=file_path,
+        shape=shape,
+        dtype=dtype,
+        offset=offset,
+        chunks="auto",
+    )
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Create dask array in {dt:.3f} ms"
+    clog.debug(msg)
+    t0 = perf_counter_ns()
+
+    # Get and set image information
+    wcs = WCS(header, fix=False)
+    header["PIX_AREA"] = np.abs(np.linalg.det(
+        wcs.celestial.pixel_scale_matrix))
+    img_shape = shape[-2:]
+
+    msg = f"File ID '{file_id}' of shape {shape} opened "
+    msg += f"with chunking: {data.chunksize}"
+    clog.debug(msg)
+
+    if data.ndim <= 2:
+        chunks = "auto"
+    elif data.ndim == 3:
+        chunks = {0: 1, 1: 1, 2: "auto"}
+    elif data.ndim == 4:
+        chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
+
+    bitpix = abs(header["BITPIX"])
+    datasize = np.prod(data.shape[-2:]) * bitpix / 8 / 1024**2
+
+    if (chunks != "auto") and (datasize > 128):
+        t0 = perf_counter_ns()
+        frames = mmap_dask_array(
+            filename=file_path,
+            shape=shape,
+            dtype=dtype,
+            offset=offset,
+            chunks=chunks,
+        )
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Create dask frame array in {dt:.3f} ms "
+        msg += f"with chunking: {frames.chunksize}"
+        clog.debug(msg)
+    else:
+        frames = data
+
+    memmap = fits.getdata(file_path, hdu_index, memmap=True)
+
+    filedata = FileData(
+        data=data,
+        frames=frames,
+        header=header,
+        file_type=CARTA.FileType.FITS,
+        hdu_index=hdu_index,
+        img_shape=img_shape,
+        memmap=memmap,
+        hist_on=False,
+    )
+    return filedata
+
+
+def get_zarr_FileData(file_id, file_path):
+    # Currently zarr
+    data = open_zarr(file_path)
+    header = get_header_from_xradio(data)
+    img_shape = [data.sizes['m'], data.sizes['l']]
+    # Log file information in separate parts to avoid
+    # formatting conflicts
+    clog.debug(f"File ID '{file_id}' opened successfully")
+    clog.debug(
+        f"File dimensions: time={data.sizes.get('time', 'N/A')}, "
+        f"frequency={data.sizes.get('frequency', 'N/A')}, "
+        f"polarization={data.sizes.get('polarization', 'N/A')}, "
+        f"l={data.sizes.get('l', 'N/A')}, "
+        f"m={data.sizes.get('m', 'N/A')}")
+    clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
+    frames = data
+    memmap = None
+
+    filedata = FileData(
+        data=data,
+        frames=frames,
+        header=header,
+        file_type=CARTA.FileType.CASA,
+        hdu_index=None,
+        img_shape=img_shape,
+        memmap=memmap,
+        hist_on=False,
+    )
+    return filedata
