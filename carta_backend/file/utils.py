@@ -10,7 +10,7 @@ from xarray import Dataset
 
 from carta_backend import proto as CARTA
 from carta_backend.log import logger
-from carta_backend.utils.utils import get_folder_size
+from carta_backend.utils import get_folder_size
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")

@@ -16,7 +16,7 @@ from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (get_file_type, get_header_from_xradio,
                                       load_data)
 from carta_backend.log import logger
-from carta_backend.tile.utils import layer_to_mip
+from carta_backend.tile import layer_to_mip
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")

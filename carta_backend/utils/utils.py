@@ -5,8 +5,7 @@ import subprocess
 from typing import Tuple
 
 from carta_backend import proto as CARTA
-from carta_backend.log.log import logger
-from carta_backend.proto.enums_pb2 import EventType
+from carta_backend.log import logger
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -183,7 +182,7 @@ PROTO_FUNC_MAP = {
     90: CARTA.ChannelMapFlowControl,
 }
 
-EVENT_TYPE_MAP = {v: k for k, v in EventType.items()}
+EVENT_TYPE_MAP = {v: k for k, v in CARTA.EventType.items()}
 
 
 def get_event_info(message: bytes) -> Tuple[int, str]:
