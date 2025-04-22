@@ -33,6 +33,8 @@ class FileData:
     img_shape: Tuple[int, int]
     memmap: np.ndarray | Dataset | None
     hist_on: bool
+    data_size: float  # Unit: MiB
+    frame_size: float  # Unit: MiB
 
 
 class FileManager:
@@ -80,11 +82,10 @@ class FileManager:
                 if key.startswith(str(file_id)):
                     del self.cache[key]
 
-        if isinstance(channel, int):
-            if use_memmap and self.files[file_id].memmap is not None:
-                data = self.files[file_id].memmap
-            else:
-                data = self.files[file_id].frames
+        frame_size = self.files[file_id].frame_size
+
+        if isinstance(channel, int) and (frame_size <= 132.25):
+            data = self.files[file_id].memmap
         else:
             data = self.files[file_id].data
 
@@ -100,9 +101,6 @@ class FileManager:
             elif isinstance(data, np.ndarray):
                 data = block_reduce(
                     data, (mip, mip), getattr(np, coarsen_func))
-
-        # if (data.nbytes / 1024**2 <= 128) and client is not None:
-        #     data = client.persist(data)
 
         if isinstance(data, np.ndarray):
             data = data.astype("float32")
@@ -286,6 +284,8 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     header["PIX_AREA"] = np.abs(np.linalg.det(
         wcs.celestial.pixel_scale_matrix))
     img_shape = shape[-2:]
+    data_size = data.nbytes / 1024**2
+    frame_size = data_size / np.prod(data.shape[:-2])
 
     msg = f"File ID '{file_id}' of shape {shape} opened "
     msg += f"with chunking: {data.chunksize}"
@@ -298,10 +298,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     elif data.ndim == 4:
         chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
 
-    bitpix = abs(header["BITPIX"])
-    datasize = np.prod(data.shape[-2:]) * bitpix / 8 / 1024**2
-
-    if (chunks != "auto") and (datasize > 128):
+    if (chunks != "auto") and (data_size > 128):
         t0 = perf_counter_ns()
         frames = mmap_dask_array(
             filename=file_path,
@@ -328,6 +325,8 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         img_shape=img_shape,
         memmap=memmap,
         hist_on=False,
+        data_size=data_size,
+        frame_size=frame_size,
     )
     return filedata
 
@@ -348,7 +347,14 @@ def get_zarr_FileData(file_id, file_path):
         f"m={data.sizes.get('m', 'N/A')}")
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
     frames = data
-    memmap = None
+    memmap = open_zarr(file_path, chunks=None)
+
+    data_size = data.SKY.nbytes / 1024**2
+    factor = 1
+    for k, v in data.SKY.sizes.items():
+        if k not in ["l", "m"]:
+            factor *= v
+    frame_size = data_size / factor
 
     filedata = FileData(
         data=data,
@@ -359,5 +365,7 @@ def get_zarr_FileData(file_id, file_path):
         img_shape=img_shape,
         memmap=memmap,
         hist_on=False,
+        data_size=data_size,
+        frame_size=frame_size,
     )
     return filedata
