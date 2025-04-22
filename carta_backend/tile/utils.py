@@ -130,10 +130,27 @@ def decode_tile_coord(encoded_coord):
     return x, y, layer
 
 
-@njit(nb.float32[:](nb.float32[:, ::1]), fastmath=True)
+@njit(nb.float32[:, ::1](nb.float32[:, ::1]))
 def fill_nan_with_block_average(data):
+    """
+    Fill NaN values in a 2D array with the average of non-NaN
+    values in 4x4 blocks.
+
+    Parameters
+    ----------
+    data : numpy.ndarray
+        2D float32 array that may contain NaN values
+
+    Returns
+    -------
+    numpy.ndarray
+        2D float32 array with NaN values replaced by block
+        averages where possible
+    """
     h, w = data.shape
-    data = data.ravel()
+    # Create a copy to avoid modifying the original array
+    result = data.copy()
+    flat_result = result.ravel()
 
     for i in range(0, w, 4):
         for j in range(0, h, 4):
@@ -149,7 +166,7 @@ def fill_nan_with_block_average(data):
             for x in range(block_width):
                 for y in range(block_height):
                     idx = block_start + (y * w) + x
-                    v = data[idx]
+                    v = flat_result[idx]
                     if not np.isnan(v):
                         valid_count += 1
                         sum_val += v
@@ -162,6 +179,6 @@ def fill_nan_with_block_average(data):
                 for x in range(block_width):
                     for y in range(block_height):
                         idx = block_start + (y * w) + x
-                        if np.isnan(data[idx]):
-                            data[idx] = average
-    return data
+                        if np.isnan(flat_result[idx]):
+                            flat_result[idx] = average
+    return result
