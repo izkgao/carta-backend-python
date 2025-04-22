@@ -181,11 +181,6 @@ class Session:
             response.success = False
             response.message = "Not implemented"
 
-        # Get client info
-        worker_info = self.client.cluster.scheduler_info['workers']
-        mem_limit = sum([i['memory_limit'] for i in worker_info.values()])
-        self.mem_limit = mem_limit / 1024**3  # Gibibytes
-
         # Send message
         event_type = EventType.REGISTER_VIEWER_ACK
         message = self.encode_message(event_type, request_id, response)
@@ -512,6 +507,8 @@ class Session:
 
         await self.queue.put(message)
 
+        return None
+
     async def send_RasterTileSync(
         self,
         request_id: int,
@@ -540,8 +537,6 @@ class Session:
 
         priority = next(self.priority_counter)
 
-        tile_count = 0
-
         # Cancel futures with lower priority
         # async with self.lock:
         #     for p in list(self.tile_futures.keys()):
@@ -566,7 +561,6 @@ class Session:
                 channel=channel,
                 stokes=stokes
             )
-            tile_count += 1
         else:
             layer = decode_tile_coord(tiles[0])[2]
             data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
@@ -585,39 +579,44 @@ class Session:
                 # async with self.lock:
                 #     self.tile_futures[priority] = futures
 
-                async for future in as_completed(futures):
-                    x, y, layer = futures[future]
-                    await self.send_RasterTileData(
-                        request_id=request_id,
-                        file_id=file_id,
-                        data=await future,
-                        compression_type=compression_type,
-                        compression_quality=compression_quality,
-                        channel=channel,
-                        stokes=stokes,
-                        x=x,
-                        y=y,
-                        layer=layer
-                    )
-                    tile_count += 1
+                async with asyncio.TaskGroup() as tg:
+                    async for future in as_completed(futures):
+                        x, y, layer = futures[future]
+                        tg.create_task(
+                            self.send_RasterTileData(
+                                request_id=request_id,
+                                file_id=file_id,
+                                data=await future,
+                                compression_type=compression_type,
+                                compression_quality=compression_quality,
+                                channel=channel,
+                                stokes=stokes,
+                                x=x,
+                                y=y,
+                                layer=layer
+                            )
+                        )
             else:
-                for tile in tiles:
-                    x, y, layer = decode_tile_coord(tile)
-                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
-                    idata = data[slicey, slicex]
-                    await self.send_RasterTileData(
-                        request_id=request_id,
-                        file_id=file_id,
-                        data=idata,
-                        compression_type=compression_type,
-                        compression_quality=compression_quality,
-                        channel=channel,
-                        stokes=stokes,
-                        x=x,
-                        y=y,
-                        layer=layer
-                    )
-                    tile_count += 1
+                async with asyncio.TaskGroup() as tg:
+                    for tile in tiles:
+                        x, y, layer = decode_tile_coord(tile)
+                        slicey, slicex = get_tile_slice(
+                            x, y, layer, image_shape)
+                        idata = data[slicey, slicex]
+                        tg.create_task(
+                            self.send_RasterTileData(
+                                request_id=request_id,
+                                file_id=file_id,
+                                data=idata,
+                                compression_type=compression_type,
+                                compression_quality=compression_quality,
+                                channel=channel,
+                                stokes=stokes,
+                                x=x,
+                                y=y,
+                                layer=layer
+                            )
+                        )
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Get tile data group in {dt:.3f} ms"
@@ -731,7 +730,7 @@ class Session:
         # Set parameters
         tiles = list(tiles)
 
-        # # RegionHistogramData
+        # RegionHistogramData
         has_hist = self.fm.files[file_id].hist_on
         if not has_hist:
             await self.send_RegionHistogramData(
@@ -1263,14 +1262,17 @@ class Session:
 
         # Send spectral profile
         if self.spec_prof_on or self.spec_prof_cursor_on:
-            await self.send_SpectroProfileData(
-                request_id=0,
-                file_id=file_id,
-                region_id=region_id,
-                region_info=region_info,
-                stats_type=self.prev_stats_type,
-                x=x,
-                y=y
+            # Use create_task to avoid blocking the event loop
+            asyncio.create_task(
+                self.send_SpectroProfileData(
+                    request_id=0,
+                    file_id=file_id,
+                    region_id=region_id,
+                    region_info=region_info,
+                    stats_type=self.prev_stats_type,
+                    x=x,
+                    y=y
+                )
             )
 
         return None
