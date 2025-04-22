@@ -287,9 +287,10 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     data_size = data.nbytes / 1024**2
     frame_size = data_size / np.prod(data.shape[:-2])
 
-    msg = f"File ID '{file_id}' of shape {shape} opened "
-    msg += f"with chunking: {data.chunksize}"
-    clog.debug(msg)
+    clog.debug(f"File ID '{file_id}' opened successfully")
+    clog.debug(
+        f"File dimensions: {shape}, "
+        f"chunking: {str(data.chunksize)}")
 
     if data.ndim <= 2:
         chunks = "auto"
