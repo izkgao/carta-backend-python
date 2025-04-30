@@ -2,6 +2,7 @@ import os
 import platform
 import socket
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple
 
 from carta_backend import proto as CARTA
@@ -90,12 +91,22 @@ def get_system_info():
     return system_info
 
 
+# def get_folder_size(path: str) -> int:
+#     total_size = 0
+#     for dirpath, _, filenames in os.walk(path):
+#         for f in filenames:
+#             fp = os.path.join(dirpath, f)
+#             total_size += os.path.getsize(fp)
+#     return total_size
+
+
 def get_folder_size(path: str) -> int:
     total_size = 0
-    for dirpath, _, filenames in os.walk(path):
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            total_size += os.path.getsize(fp)
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
+        for dirpath, _, filenames in os.walk(path):
+            sizes = executor.map(
+                lambda x: os.path.getsize(os.path.join(dirpath, x)), filenames)
+            total_size += sum(sizes)
     return total_size
 
 
