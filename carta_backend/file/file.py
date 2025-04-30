@@ -84,8 +84,11 @@ class FileManager:
 
         frame_size = self.files[file_id].frame_size
 
-        if isinstance(channel, int) and (frame_size <= 132.25):
-            data = self.files[file_id].memmap
+        if isinstance(channel, int):
+            if frame_size <= 132.25:
+                data = self.files[file_id].memmap
+            else:
+                data = self.files[file_id].frames
         else:
             data = self.files[file_id].data
 
@@ -299,7 +302,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     elif data.ndim == 4:
         chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
 
-    if (chunks != "auto") and (data_size > 128):
+    if (chunks != "auto") and (data_size > 132.25):
         t0 = perf_counter_ns()
         frames = mmap_dask_array(
             filename=file_path,
