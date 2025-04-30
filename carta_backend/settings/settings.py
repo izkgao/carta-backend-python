@@ -18,8 +18,8 @@ class ProgramSettings:
     ) -> None:
         self.host = host
         self.socket_port = socket_port
-        self.frontend_folder = frontend_folder
-        self.backend_path = backend_path
+        self.frontend_folder = os.path.abspath(frontend_folder)
+        self.backend_path = os.path.abspath(backend_path)
         self.user_folder_prefix = user_folder_prefix
         if platform.system() == "Windows":
             cwd = Path.cwd()
