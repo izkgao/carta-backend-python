@@ -324,7 +324,13 @@ def get_file_info_extended(headers, file_name):
 
 
 def get_header_from_xradio(xarr):
-    wcs_dict = xarr["SKY"].direction_info
+    if hasattr(xarr, "direction"):
+        wcs_dict = xarr.direction
+    elif hasattr(xarr["SKY"], "direction_info"):
+        wcs_dict = xarr["SKY"].direction_info
+    else:
+        raise ValueError(
+            "Could not find direction information in Xradio dataset")
 
     # Calculate dimensions except time
     keys = list(xarr.sizes)
