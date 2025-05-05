@@ -26,7 +26,6 @@ ptlog = logger.bind(name="Protocol")
 @dataclass
 class FileData:
     data: np.ndarray | da.Array | Dataset
-    frames: da.Array | None
     header: fits.Header
     file_type: int
     hdu_index: int
@@ -84,11 +83,8 @@ class FileManager:
 
         frame_size = self.files[file_id].frame_size
 
-        if isinstance(channel, int):
-            if frame_size <= 132.25:
-                data = self.files[file_id].memmap
-            else:
-                data = self.files[file_id].frames
+        if isinstance(channel, int) and (frame_size <= 132.25):
+            data = self.files[file_id].memmap
         else:
             data = self.files[file_id].data
 
@@ -295,34 +291,10 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         f"File dimensions: {shape}, "
         f"chunking: {str(data.chunksize)}")
 
-    if data.ndim <= 2:
-        chunks = "auto"
-    elif data.ndim == 3:
-        chunks = {0: 1, 1: 1, 2: "auto"}
-    elif data.ndim == 4:
-        chunks = {0: 1, 1: 1, 2: "auto", 3: "auto"}
-
-    if (chunks != "auto") and (data_size > 132.25):
-        t0 = perf_counter_ns()
-        frames = mmap_dask_array(
-            filename=file_path,
-            shape=shape,
-            dtype=dtype,
-            offset=offset,
-            chunks=chunks,
-        )
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Create dask frame array in {dt:.3f} ms "
-        msg += f"with chunking: {frames.chunksize}"
-        clog.debug(msg)
-    else:
-        frames = data
-
     memmap = fits.getdata(file_path, hdu_index, memmap=True)
 
     filedata = FileData(
         data=data,
-        frames=frames,
         header=header,
         file_type=CARTA.FileType.FITS,
         hdu_index=hdu_index,
@@ -350,7 +322,6 @@ def get_zarr_FileData(file_id, file_path, client=None):
         f"l={data.sizes.get('l', 'N/A')}, "
         f"m={data.sizes.get('m', 'N/A')}")
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
-    frames = data
     memmap = open_zarr(file_path, chunks=None)
 
     data_size = data.SKY.nbytes / 1024**2
@@ -362,7 +333,6 @@ def get_zarr_FileData(file_id, file_path, client=None):
 
     filedata = FileData(
         data=data,
-        frames=frames,
         header=header,
         file_type=CARTA.FileType.CASA,
         hdu_index=None,
