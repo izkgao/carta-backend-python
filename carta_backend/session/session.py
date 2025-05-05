@@ -371,7 +371,7 @@ class Session:
         if file_info.type == CARTA.FileType.CASA:
             # Currently zarr
             xarr = open_zarr(file_path)
-            hdr = get_header_from_xradio(xarr)
+            hdr = get_header_from_xradio(xarr, self.client)
             xarr.close()
             fex_dict = get_file_info_extended([hdr], file)
             for k, v in fex_dict.items():
@@ -424,7 +424,7 @@ class Session:
         self.file_path = file_path
 
         # Open file
-        self.fm.open(file_id, file_path, hdu_index)
+        self.fm.open(file_id, file_path, hdu_index, self.client)
         header = self.fm.files[file_id].header
 
         # OpenFileAck

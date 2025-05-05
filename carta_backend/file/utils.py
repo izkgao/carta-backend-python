@@ -1,3 +1,4 @@
+import asyncio
 import os
 from pathlib import Path
 from typing import Optional, Union
@@ -323,14 +324,122 @@ def get_file_info_extended(headers, file_name):
     return fex_dict
 
 
-def get_header_from_xradio(xarr):
+def get_header_from_xradio(xarr, client=None):
     if hasattr(xarr, "direction"):
-        wcs_dict = xarr.direction
+        hdr = get_header_from_xradio_new(xarr, client)
     elif hasattr(xarr["SKY"], "direction_info"):
-        wcs_dict = xarr["SKY"].direction_info
+        hdr = get_header_from_xradio_old(xarr)
     else:
         raise ValueError(
             "Could not find direction information in Xradio dataset")
+    return hdr
+
+
+def get_header_from_xradio_new(xarr, client=None):
+    wcs_dict = xarr.direction
+
+    # Calculate dimensions except time
+    keys = list(xarr.sizes)
+    keys.pop(keys.index("time"))
+    keys.pop(keys.index("beam_param"))
+    naxis = len(keys)
+
+    # Get PC
+    pc = np.array(wcs_dict["pc"]["_value"])
+    if (pc - np.identity(2)).sum() == 0:
+        pc = np.identity(naxis)
+    else:
+        # Not implemented
+        pc = np.identity(naxis)
+
+    # Get crpix
+    crpix = []
+    for axis in ["l", "m"]:
+        crpix.append(np.nonzero((xarr[axis] == 0).values)[0][0] + 1)
+    crpix.extend([1.0] * (naxis - 2))
+
+    # Get crval
+    crval = []
+    crval.append(np.rad2deg(wcs_dict["reference"]["data"][0]))
+    crval.append(np.rad2deg(wcs_dict["reference"]["data"][1]))
+    if "frequency" in keys:
+        crval.append(xarr["frequency"].attrs["reference_value"]["data"])
+    if "polarization" in keys:
+        crval.append(1.0)
+
+    # Get cdelt
+    cdelt = []
+    for axis in ["l", "m"]:
+        cdelt.append(np.rad2deg(xarr[axis][1] - xarr[axis][0]).values)
+    if "frequency" in keys:
+        values = xarr.frequency.values
+        cdelt.append(values[1] - values[0])
+    if "polarization" in keys:
+        cdelt.append(1.0)
+
+    # Get ctype
+    ctype = [f'RA---{wcs_dict["projection"]}',
+             f'DEC--{wcs_dict["projection"]}']
+    if "frequency" in keys:
+        ctype.append("FREQ")
+    if "polarization" in keys:
+        ctype.append("STOKES")
+
+    # Get shape
+    sizes = xarr.sizes
+    shape = [sizes["l"], sizes["m"]]
+    if "frequency" in keys:
+        shape.append(sizes["frequency"])
+    if "polarization" in keys:
+        shape.append(sizes["polarization"])
+
+    # Create WCS object
+    wcs = WCS(naxis=naxis)
+
+    # Set the reference pixel and coordinate
+    wcs.wcs.crval = crval
+    wcs.wcs.crpix = crpix
+    wcs.wcs.cdelt = cdelt
+    wcs.wcs.ctype = ctype
+    wcs.wcs.pc = pc
+
+    # Set additional parameters
+    wcs.wcs.lonpole = np.rad2deg(wcs_dict["lonpole"]["data"])
+    wcs.wcs.latpole = np.rad2deg(wcs_dict["latpole"]["data"])
+    wcs.pixel_shape = shape
+
+    # Get header
+    bitpix_mapping = {"uint8": 8, "int16": 16, "int32": 32, "int64": 64,
+                      "float32": -32, "float64": -64}
+    hdr = wcs.to_header()
+    hdr["BITPIX"] = bitpix_mapping[xarr["SKY"].dtype.name]
+    hdr["NAXIS"] = hdr["WCSAXES"]
+    for i, v in enumerate(wcs.pixel_shape):
+        hdr[f"NAXIS{i+1}"] = v
+    hdr["BUNIT"] = xarr["SKY"].units[0]
+    sky_attrs = wcs_dict["reference"]["attrs"]
+    freq_attrs = xarr["frequency"].reference_value["attrs"]
+    hdr["RADESYS"] = sky_attrs["frame"]
+    hdr["EQUINOX"] = sky_attrs["equinox"]
+    hdr["SPECSYS"] = freq_attrs["observer"].upper()
+
+    if client is not None and client.asynchronous:
+        loop = asyncio.get_event_loop()
+        beam = loop.run_until_complete(client.compute(
+            xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data))
+    else:
+        beam = xarr["BEAM"].isel(
+            time=0, frequency=0, polarization=0).data.compute()
+    bmaj, bmin, bpa = np.rad2deg(beam)
+    hdr["BMAJ"] = bmaj
+    hdr["BMIN"] = bmin
+    hdr["BPA"] = bpa
+    hdr["PIX_AREA"] = np.abs(np.linalg.det(wcs.celestial.pixel_scale_matrix))
+    return hdr
+
+
+def get_header_from_xradio_old(xarr):
+    wcs_dict = xarr["SKY"].direction_info
 
     # Calculate dimensions except time
     keys = list(xarr.sizes)
