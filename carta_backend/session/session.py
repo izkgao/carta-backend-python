@@ -951,7 +951,8 @@ class Session:
 
         # Get data
         shape = self.fm.files[file_id].img_shape
-        if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
+        frame_size = self.fm.files[file_id].frame_size
+        if frame_size <= 132.25:
             use_memmap = True
         else:
             use_memmap = False

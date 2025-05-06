@@ -64,7 +64,7 @@ class FileManager:
 
     def get_slice(self, file_id, channel, stokes, time=0,
                   layer=None, mip=None, coarsen_func="nanmean",
-                  client=None, use_memmap=False):
+                  use_memmap=False):
         if layer is not None:
             mip = layer_to_mip(
                 layer,
@@ -83,7 +83,7 @@ class FileManager:
 
         frame_size = self.files[file_id].frame_size
 
-        if isinstance(channel, int) and (frame_size <= 132.25):
+        if use_memmap or (isinstance(channel, int) and (frame_size <= 132.25)):
             data = self.files[file_id].memmap
         else:
             data = self.files[file_id].data
