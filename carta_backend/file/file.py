@@ -88,7 +88,6 @@ class FileManager:
                 if not key.startswith(frame_name):
                     clog.debug(f"Clearing cache for {key}")
                     del self.cache[key]
-            clog.debug('here')
 
         frame_size = self.files[file_id].frame_size
         available_mem = psutil.virtual_memory().available / 1024**2
