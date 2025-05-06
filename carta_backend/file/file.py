@@ -85,7 +85,7 @@ class FileManager:
             # This means that the user is viewing another channel/stokes
             # so we can clear the cache of previous channel/stokes
             for key in list(self.cache.keys()):
-                if not key.startswith(frame_name):
+                if not key.startswith(frame_name) and channel is not None:
                     clog.debug(f"Clearing cache for {key}")
                     del self.cache[key]
 
