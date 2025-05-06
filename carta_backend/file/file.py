@@ -41,7 +41,7 @@ class FileManager:
         self.files = {}
         self.cache = WeakValueDictionary()
 
-    def open(self, file_id, file_path, hdu_index=None, client=None):
+    async def open(self, file_id, file_path, hdu_index=None, client=None):
         if file_id in self.files:
             clog.error(f"File ID '{file_id}' already exists.")
             return None
@@ -51,7 +51,7 @@ class FileManager:
         if file_type == CARTA.FileType.FITS:
             filedata = get_fits_FileData(file_id, file_path, hdu_index)
         elif file_type == CARTA.FileType.CASA:
-            filedata = get_zarr_FileData(file_id, file_path, client)
+            filedata = await get_zarr_FileData(file_id, file_path, client)
 
         self.files[file_id] = filedata
 
@@ -307,10 +307,10 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     return filedata
 
 
-def get_zarr_FileData(file_id, file_path, client=None):
+async def get_zarr_FileData(file_id, file_path, client=None):
     # Currently zarr
     data = open_zarr(file_path)
-    header = get_header_from_xradio(data, client)
+    header = await get_header_from_xradio(data, client)
     img_shape = [data.sizes['m'], data.sizes['l']]
     # Log file information in separate parts to avoid
     # formatting conflicts

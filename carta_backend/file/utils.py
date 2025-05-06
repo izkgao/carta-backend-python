@@ -1,4 +1,3 @@
-import asyncio
 import os
 from pathlib import Path
 from typing import Optional, Union
@@ -324,9 +323,9 @@ def get_file_info_extended(headers, file_name):
     return fex_dict
 
 
-def get_header_from_xradio(xarr, client=None):
+async def get_header_from_xradio(xarr, client=None):
     if hasattr(xarr, "direction"):
-        hdr = get_header_from_xradio_new(xarr, client)
+        hdr = await get_header_from_xradio_new(xarr, client)
     elif hasattr(xarr["SKY"], "direction_info"):
         hdr = get_header_from_xradio_old(xarr)
     else:
@@ -335,7 +334,7 @@ def get_header_from_xradio(xarr, client=None):
     return hdr
 
 
-def get_header_from_xradio_new(xarr, client=None):
+async def get_header_from_xradio_new(xarr, client=None):
     wcs_dict = xarr.direction
 
     # Calculate dimensions except time
@@ -419,14 +418,13 @@ def get_header_from_xradio_new(xarr, client=None):
     hdr["BUNIT"] = xarr["SKY"].units[0]
     sky_attrs = wcs_dict["reference"]["attrs"]
     freq_attrs = xarr["frequency"].reference_value["attrs"]
-    hdr["RADESYS"] = sky_attrs["frame"]
-    hdr["EQUINOX"] = sky_attrs["equinox"]
+    hdr["RADESYS"] = sky_attrs["frame"].upper()
+    hdr["EQUINOX"] = sky_attrs["equinox"].upper()
     hdr["SPECSYS"] = freq_attrs["observer"].upper()
 
     if client is not None and client.asynchronous:
-        loop = asyncio.get_event_loop()
-        beam = loop.run_until_complete(client.compute(
-            xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data))
+        beam = await client.compute(
+            xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data)
     else:
         beam = xarr["BEAM"].isel(
             time=0, frequency=0, polarization=0).data.compute()
