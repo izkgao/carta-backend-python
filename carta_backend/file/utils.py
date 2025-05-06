@@ -415,11 +415,14 @@ async def get_header_from_xradio_new(xarr, client=None):
     hdr["NAXIS"] = hdr["WCSAXES"]
     for i, v in enumerate(wcs.pixel_shape):
         hdr[f"NAXIS{i+1}"] = v
-    hdr["BUNIT"] = xarr["SKY"].units[0]
+    bunit = xarr["SKY"].units
+    if isinstance(bunit, list):
+        bunit = bunit[0]
+    hdr["BUNIT"] = bunit
     sky_attrs = wcs_dict["reference"]["attrs"]
     freq_attrs = xarr["frequency"].reference_value["attrs"]
     hdr["RADESYS"] = sky_attrs["frame"].upper()
-    hdr["EQUINOX"] = sky_attrs["equinox"].upper()
+    hdr["EQUINOX"] = sky_attrs.get("equinox", "J2000.0").upper()
     hdr["SPECSYS"] = freq_attrs["observer"].upper()
 
     if client is not None and client.asynchronous:
