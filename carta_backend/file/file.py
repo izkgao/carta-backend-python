@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from time import perf_counter_ns
 from typing import Tuple
-from weakref import WeakValueDictionary
 
 import astropy.io.fits as fits
 import dask
 import dask.array as da
 import numpy as np
+import psutil
 from astropy.nddata import block_reduce
 from astropy.wcs import WCS
 from xarray import Dataset, open_zarr
@@ -37,11 +37,12 @@ class FileData:
 
 
 class FileManager:
-    def __init__(self):
+    def __init__(self, client=None):
         self.files = {}
-        self.cache = WeakValueDictionary()
+        self.cache = {}
+        self.client = client
 
-    async def open(self, file_id, file_path, hdu_index=None, client=None):
+    async def open(self, file_id, file_path, hdu_index=None):
         if file_id in self.files:
             clog.error(f"File ID '{file_id}' already exists.")
             return None
@@ -51,7 +52,7 @@ class FileManager:
         if file_type == CARTA.FileType.FITS:
             filedata = get_fits_FileData(file_id, file_path, hdu_index)
         elif file_type == CARTA.FileType.CASA:
-            filedata = await get_zarr_FileData(file_id, file_path, client)
+            filedata = await get_zarr_FileData(file_id, file_path, self.client)
 
         self.files[file_id] = filedata
 
@@ -62,9 +63,9 @@ class FileManager:
             return None
         return self.files[file_id]
 
-    def get_slice(self, file_id, channel, stokes, time=0,
-                  layer=None, mip=None, coarsen_func="nanmean",
-                  use_memmap=False):
+    async def get_slice(self, file_id, channel, stokes, time=0,
+                        layer=None, mip=1, coarsen_func="nanmean",
+                        use_memmap=False):
         if layer is not None:
             mip = layer_to_mip(
                 layer,
@@ -72,25 +73,37 @@ class FileManager:
                 tile_shape=TILE_SHAPE)
 
         name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
-        if name in self.cache:
+        frame_name = f"{file_id}_{channel}_{stokes}_{time}"
+        clog.debug(f"Getting slice for {name}")
+
+        clog.debug(f"Cache keys: {list(self.cache.keys())}")
+
+        if name in list(self.cache.keys()):
+            clog.debug(f"Using cached data for {name}")
             return self.cache[name]
         else:
-            # This means that the user is viewing another channel/stokes/mip
-            # so we can clear the cache of previous channel/stokes/mip
+            # This means that the user is viewing another channel/stokes
+            # so we can clear the cache of previous channel/stokes
             for key in list(self.cache.keys()):
-                if key.startswith(str(file_id)):
+                if not key.startswith(frame_name):
+                    clog.debug(f"Clearing cache for {key}")
                     del self.cache[key]
+            clog.debug('here')
 
         frame_size = self.files[file_id].frame_size
+        available_mem = psutil.virtual_memory().available / 1024**2
 
-        if use_memmap or (isinstance(channel, int) and (frame_size <= 132.25)):
+        if isinstance(channel, int) and (frame_size <= (available_mem * 0.5)):
+            use_memmap = True
+
+        if use_memmap:
             data = self.files[file_id].memmap
         else:
             data = self.files[file_id].data
 
         data = load_data(data, channel, stokes, time)
 
-        if mip is not None and mip > 1:
+        if mip > 1:
             if isinstance(data, da.Array):
                 data = da.coarsen(
                     getattr(da, coarsen_func),
@@ -100,9 +113,15 @@ class FileManager:
             elif isinstance(data, np.ndarray):
                 data = block_reduce(
                     data, (mip, mip), getattr(np, coarsen_func))
+        else:
+            if isinstance(data, np.ndarray) and use_memmap:
+                data = data[:]
 
         if isinstance(data, np.ndarray):
             data = data.astype("float32")
+
+        if use_memmap and isinstance(data, da.Array):
+            data = await self.client.compute(data)
 
         self.cache[name] = data
         return data

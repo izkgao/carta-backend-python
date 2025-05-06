@@ -8,18 +8,19 @@ from typing import Any, Optional, Tuple
 import dask.array as da
 import numpy as np
 import zfpy
+from aioitertools import iter
 from astropy.io import fits
 from dask.distributed import Client, as_completed
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
-from carta_backend.config.config import ICD_VERSION
+from carta_backend.config.config import ICD_VERSION, TILE_SHAPE
 from carta_backend.file import (FileManager, get_directory_info, get_file_info,
                                 get_file_info_extended, get_header_from_xradio)
 from carta_backend.log import logger
 from carta_backend.region import get_region, get_spectral_profile_dask
 from carta_backend.tile import (decode_tile_coord, get_nan_encodings_block,
-                                get_tile_slice)
+                                get_tile_slice, layer_to_mip)
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
 clog = logger.bind(name="CARTA")
@@ -56,7 +57,7 @@ class Session:
         self.starting_folder = Path(starting_folder)
         self.lock = lock or asyncio.Lock()
         self.client = client
-        self.fm = FileManager()
+        self.fm = FileManager(client)
 
         # Set up message queue
         self.queue = asyncio.Queue()
@@ -424,7 +425,7 @@ class Session:
         self.file_path = file_path
 
         # Open file
-        await self.fm.open(file_id, file_path, hdu_index, self.client)
+        await self.fm.open(file_id, file_path, hdu_index)
         header = self.fm.files[file_id].header
 
         # OpenFileAck
@@ -451,33 +452,26 @@ class Session:
         region_id: int,
         channel: int = 0,
         stokes: int = 0,
+        mip: int = 1,
     ) -> None:
         """This only executes one time when the image is first loaded."""
         # Load image
         t0 = perf_counter_ns()
-        shape = self.fm.files[file_id].img_shape
-        if (np.prod(shape[-2:]) * 4 / 1024**2) <= 128:
-            use_memmap = True
-        else:
-            use_memmap = False
-        data = self.fm.get_slice(
-            file_id, channel, stokes, use_memmap=use_memmap)
 
-        if not use_memmap:
-            # If image is larger than 128MB, lazy load
-            dt = (perf_counter_ns() - t0) / 1e6
-            mpix_s = data.size / 1e6 / dt * 1000
-            msg = f"Lazy load {data.shape[0]}x{data.shape[1]} image "
-            msg += f"in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
-            clog.debug(msg)
+        data = await self.fm.get_slice(
+            file_id, channel, stokes, mip=mip)
+
+        dt = (perf_counter_ns() - t0) / 1e6
+
+        shape = data.shape
+        mpix_s = data.size / 1e6 / dt * 1000
+
+        if isinstance(data, np.ndarray):
+            msg = f"Load {shape[0]}x{shape[1]} image to cache "
         else:
-            # If image is smaller than 128MB, load to cache
-            data = data[:]
-            dt = (perf_counter_ns() - t0) / 1e6
-            mpix_s = data.size / 1e6 / dt * 1000
-            msg = f"Load {data.shape[0]}x{data.shape[1]} image to "
-            msg += f"cache in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
-            clog.debug(msg)
+            msg = f"Lazy load {shape[0]}x{shape[1]} image "
+        msg += f"in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
+        clog.debug(msg)
 
         # RegionHistogramData
         # Not fully implemented
@@ -552,7 +546,7 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
-            data = self.fm.get_slice(file_id, channel, stokes)
+            data = await self.fm.get_slice(file_id, channel, stokes)
             if isinstance(data, da.Array):
                 data = await self.client.compute(data[:, :], priority=priority)
             await self.send_RasterTileData(
@@ -566,7 +560,8 @@ class Session:
             )
         else:
             layer = decode_tile_coord(tiles[0])[2]
-            data = self.fm.get_slice(file_id, channel, stokes, layer=layer)
+            data = await self.fm.get_slice(
+                file_id, channel, stokes, layer=layer)
             image_shape = self.fm.files[file_id].img_shape
 
             if isinstance(data, da.Array):
@@ -600,30 +595,25 @@ class Session:
                             )
                         )
             else:
-                async with asyncio.TaskGroup() as tg:
-                    for tile in tiles:
-                        x, y, layer = decode_tile_coord(tile)
-                        slicey, slicex = get_tile_slice(
-                            x, y, layer, image_shape)
-                        idata = data[slicey, slicex]
-                        tg.create_task(
-                            self.send_RasterTileData(
-                                request_id=request_id,
-                                file_id=file_id,
-                                data=idata,
-                                compression_type=compression_type,
-                                compression_quality=compression_quality,
-                                channel=channel,
-                                stokes=stokes,
-                                x=x,
-                                y=y,
-                                layer=layer
-                            )
-                        )
+                async for tile in iter(tiles):
+                    x, y, layer = decode_tile_coord(tile)
+                    slicey, slicex = get_tile_slice(
+                        x, y, layer, image_shape)
+                    idata = data[slicey, slicex]
+                    await self.send_RasterTileData(
+                        request_id=request_id,
+                        file_id=file_id,
+                        data=idata,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        x=x,
+                        y=y,
+                        layer=layer
+                    )
 
         dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Get tile data group in {dt:.3f} ms"
-        pflog.debug(msg)
 
         # RasterTileSync
         resp_sync.tile_count = len(tiles)
@@ -633,6 +623,9 @@ class Session:
         event_type = CARTA.EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_type, request_id, resp_sync)
         await self.queue.put(message)
+
+        msg = f"Get tile data group in {dt:.3f} ms"
+        pflog.debug(msg)
 
         return None
 
@@ -731,6 +724,11 @@ class Session:
 
         # Set parameters
         tiles = list(tiles)
+        *_, layer = decode_tile_coord(tiles[0])
+        mip = layer_to_mip(
+            layer,
+            image_shape=self.fm.files[file_id].img_shape,
+            tile_shape=TILE_SHAPE)
 
         # RegionHistogramData
         has_hist = self.fm.files[file_id].hist_on
@@ -740,7 +738,8 @@ class Session:
                 file_id=file_id,
                 region_id=-1,
                 channel=0,
-                stokes=0
+                stokes=0,
+                mip=mip
             )
             self.fm.files[file_id].hist_on = True
 
@@ -951,13 +950,7 @@ class Session:
 
         # Get data
         shape = self.fm.files[file_id].img_shape
-        frame_size = self.fm.files[file_id].frame_size
-        if frame_size <= 132.25:
-            use_memmap = True
-        else:
-            use_memmap = False
-        data = self.fm.get_slice(
-            file_id, channel, stokes, mip=mip, use_memmap=use_memmap)
+        data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
 
         if mip > 1:
             mx = x // mip
@@ -1077,7 +1070,7 @@ class Session:
         t0 = perf_counter_ns()
 
         # Get data
-        data = self.fm.get_slice(file_id, channel=None, stokes=0)
+        data = await self.fm.get_slice(file_id, channel=None, stokes=0)
         hdr = self.fm.files[file_id].header
 
         # Get spectral profile

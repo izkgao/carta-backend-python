@@ -160,9 +160,12 @@ class Server:
             message = await self.session.queue.get()
             if message is None:
                 break
-            await websocket.send_bytes(message)
-            _, event_name = get_event_info(message)
-            ptlog.debug(f"<yellow>==> {event_name}</>")
+            asyncio.create_task(self._send_message(websocket, message))
+
+    async def _send_message(self, websocket: WebSocket, message: bytes):
+        await websocket.send_bytes(message)
+        _, event_name = get_event_info(message)
+        ptlog.debug(f"<yellow>==> {event_name}</>")
 
     async def serve_root_file(self, request):
         """Serve files from the root directory.
