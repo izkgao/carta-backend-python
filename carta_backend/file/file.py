@@ -1,4 +1,6 @@
+import os
 from dataclasses import dataclass
+from glob import glob
 from time import perf_counter_ns
 from typing import Tuple
 
@@ -326,10 +328,13 @@ def get_fits_FileData(file_id, file_path, hdu_index):
 
 
 async def get_zarr_FileData(file_id, file_path, client=None):
-    # Currently zarr
-    data = open_zarr(file_path)
+    # Read zarr
+    data = open_zarr(file_path, chunks="auto")
+
+    # Get header
     header = await get_header_from_xradio(data, client)
     img_shape = [data.sizes['m'], data.sizes['l']]
+
     # Log file information in separate parts to avoid
     # formatting conflicts
     clog.debug(f"File ID '{file_id}' opened successfully")
@@ -340,7 +345,13 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         f"l={data.sizes.get('l', 'N/A')}, "
         f"m={data.sizes.get('m', 'N/A')}")
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
-    memmap = open_zarr(file_path, chunks=None)
+
+    # Get unchunked data
+    if not zarr_is_chunked(file_path):
+        # If zarr is not chunked, read it as a single chunk
+        memmap = open_zarr(file_path, chunks=None)
+    else:
+        memmap = data
 
     data_size = data.SKY.nbytes / 1024**2
     factor = 1
@@ -361,3 +372,8 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         frame_size=frame_size,
     )
     return filedata
+
+
+def zarr_is_chunked(file):
+    chunks = glob(os.path.join(file, "SKY", "*"))
+    return len(chunks) > 0
