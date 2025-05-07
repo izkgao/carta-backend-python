@@ -22,9 +22,18 @@ def get_rectangle(region_info):
     return rect
 
 
+def get_point(region_info):
+    points = region_info.control_points
+    x, y = points[0].x, points[0].y
+    x, y = round(x), round(y)
+    return shapely.Point(x, y)
+
+
 def get_region(region_info):
     if region_info.region_type == CARTA.RegionType.RECTANGLE:
         return get_rectangle(region_info)
+    elif region_info.region_type == CARTA.RegionType.POINT:
+        return get_point(region_info)
     else:
         return None
 
@@ -109,6 +118,8 @@ def get_spectral_profile(data, mask, stats_type, hdr=None):
 
 
 def get_spectral_profile_dask(data, region, stats_type, hdr=None):
+    if isinstance(region, shapely.Point):
+        return data[:, region.y, region.x].astype('<f8')
     mask = data[0].map_blocks(
         rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8))
     mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
