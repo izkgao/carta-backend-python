@@ -14,13 +14,13 @@ from dask.distributed import Client, as_completed
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
-from carta_backend.config.config import ICD_VERSION, TILE_SHAPE
+from carta_backend.config.config import ICD_VERSION
 from carta_backend.file import (FileManager, get_directory_info, get_file_info,
                                 get_file_info_extended, get_header_from_xradio)
 from carta_backend.log import logger
 from carta_backend.region import get_region, get_spectral_profile_dask
 from carta_backend.tile import (decode_tile_coord, get_nan_encodings_block,
-                                get_tile_slice, layer_to_mip)
+                                get_tile_slice)
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
 clog = logger.bind(name="CARTA")
@@ -445,6 +445,17 @@ class Session:
         message = self.encode_message(event_type, request_id, response)
         await self.queue.put(message)
 
+        # RegionHistogramData
+        await self.send_RegionHistogramData(
+            request_id=0,
+            file_id=file_id,
+            region_id=-1,
+            channel=0,
+            stokes=0
+        )
+
+        return None
+
     async def send_RegionHistogramData(
         self,
         request_id: int,
@@ -724,24 +735,6 @@ class Session:
 
         # Set parameters
         tiles = list(tiles)
-        *_, layer = decode_tile_coord(tiles[0])
-        mip = layer_to_mip(
-            layer,
-            image_shape=self.fm.files[file_id].img_shape,
-            tile_shape=TILE_SHAPE)
-
-        # RegionHistogramData
-        has_hist = self.fm.files[file_id].hist_on
-        if not has_hist:
-            await self.send_RegionHistogramData(
-                request_id=0,
-                file_id=file_id,
-                region_id=-1,
-                channel=0,
-                stokes=0,
-                mip=mip
-            )
-            self.fm.files[file_id].hist_on = True
 
         # RasterTile
         await self.send_RasterTileSync(
