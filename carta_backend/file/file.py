@@ -97,12 +97,18 @@ class FileManager:
         if isinstance(channel, int) and (frame_size <= (available_mem * 0.5)):
             use_memmap = True
 
-        if use_memmap:
-            data = self.files[file_id].memmap
-        else:
-            data = self.files[file_id].data
+        full_frame_name = f"{file_id}_{channel}_{stokes}_{time}_1"
 
-        data = load_data(data, channel, stokes, time)
+        if full_frame_name in list(self.cache.keys()):
+            clog.debug(f"Using cached data for {full_frame_name}")
+            data = self.cache[full_frame_name]
+        else:
+            if use_memmap:
+                data = self.files[file_id].memmap
+            else:
+                data = self.files[file_id].data
+
+            data = load_data(data, channel, stokes, time)
 
         if mip > 1:
             if isinstance(data, da.Array):
