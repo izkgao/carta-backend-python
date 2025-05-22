@@ -70,6 +70,20 @@ def get_directory_info(path: Union[str, Path]) -> CARTA.DirectoryInfo:
     return dir_info
 
 
+def get_axes_dict(hdr):
+    axes_dict = {}
+    for i in range(1, hdr["NAXIS"] + 1):
+        if hdr[f"CTYPE{i}"].startswith("RA"):
+            axes_dict["RA"] = i - 1
+        elif hdr[f"CTYPE{i}"].startswith("DEC"):
+            axes_dict["DEC"] = i - 1
+        elif hdr[f"CTYPE{i}"].startswith("STOKES"):
+            axes_dict["STOKES"] = i - 1
+        elif hdr[f"CTYPE{i}"].startswith("FREQ"):
+            axes_dict["FREQ"] = i - 1
+    return axes_dict
+
+
 def get_header_entries(hdr):
     header_entries = []
 
@@ -100,6 +114,8 @@ def get_header_entries(hdr):
 def get_computed_entries(hdr, hdu_index, file_name):
     computed_entries = []
 
+    axes_dict = get_axes_dict(hdr)
+
     h = CARTA.HeaderEntry()
     h.name = "Name"
     h.value = file_name
@@ -121,36 +137,35 @@ def get_computed_entries(hdr, hdu_index, file_name):
     h.value = "float" if hdr["BITPIX"] < 0 else "int"
     computed_entries.append(h)
 
-    # Not implemented yet
-    # h = CARTA.HeaderEntry()
-    # h.name = "Shape"
-
-    # values = []
-    # for i in hdr.keys():
-    #     if i.startswith("NAXIS") and len(i) > 5:
-    #         values.append(hdr[i])
-
-    # names = []
-    # for i in hdr.keys():
-    #     if i.startswith("CTYPE") and len(i) > 5:
-    #         names.append(hdr[i].split("-")[0])
-
-    # h.value = f"{str(values)} {str(names)}"
-    # computed_entries.append(h)
-
     h = CARTA.HeaderEntry()
-    h.name = "Number of channels"
-    h.entry_type = CARTA.EntryType.INT
-    h.numeric_value = hdr.get("NAXIS3", 1)
-    h.value = str(h.numeric_value)
+    h.name = "Shape"
+
+    shape = []
+    names = []
+    for i in range(1, hdr["NAXIS"] + 1):
+        shape.append(hdr[f"NAXIS{i}"])
+        names.append(hdr[f"CTYPE{i}"].split("-")[0].strip())
+    names = ", ".join(names)
+    h.value = f"{str(shape)} ({names})"
     computed_entries.append(h)
 
-    h = CARTA.HeaderEntry()
-    h.name = "Number of polarizations"
-    h.entry_type = CARTA.EntryType.INT
-    h.numeric_value = hdr.get("NAXIS4", 0)
-    h.value = str(h.numeric_value)
-    computed_entries.append(h)
+    if "FREQ" in axes_dict:
+        h = CARTA.HeaderEntry()
+        h.name = "Number of channels"
+        h.entry_type = CARTA.EntryType.INT
+        n = axes_dict["FREQ"] + 1
+        h.numeric_value = hdr.get(f"NAXIS{n}", 0)
+        h.value = str(h.numeric_value)
+        computed_entries.append(h)
+
+    if "STOKES" in axes_dict:
+        h = CARTA.HeaderEntry()
+        h.name = "Number of polarizations"
+        h.entry_type = CARTA.EntryType.INT
+        n = axes_dict["STOKES"] + 1
+        h.numeric_value = hdr.get(f"NAXIS{n}", 0)
+        h.value = str(h.numeric_value)
+        computed_entries.append(h)
 
     # Not implement yet
     h = CARTA.HeaderEntry()
@@ -158,11 +173,10 @@ def get_computed_entries(hdr, hdu_index, file_name):
     h.value = "Right Ascension, Declination"
     computed_entries.append(h)
 
-    # Not implement yet
-    # h = CARTA.HeaderEntry()
-    # h.name = "Projection"
-    # h.value = "SIN"
-    # computed_entries.append(h)
+    h = CARTA.HeaderEntry()
+    h.name = "Projection"
+    h.value = hdr["CTYPE1"].split("-")[-1].strip()
+    computed_entries.append(h)
 
     try:
         h = CARTA.HeaderEntry()
@@ -236,19 +250,18 @@ def get_computed_entries(hdr, hdu_index, file_name):
     h.value = "RADIO"
     computed_entries.append(h)
 
-    h = CARTA.HeaderEntry()
-    h.name = "Restoring beam"
-
-    try:
-        bmaj = hdr["BMAJ"] * 3600
-        bmin = hdr["BMIN"] * 3600
-        bpa = hdr["BPA"]
-        value = f'{bmaj}\" X {bmin}\", {bpa} deg'
-    except KeyError:
-        value = ""
-
-    h.value = value
-    computed_entries.append(h)
+    if "BMAJ" in hdr:
+        try:
+            bmaj = hdr["BMAJ"] * 3600
+            bmin = hdr["BMIN"] * 3600
+            bpa = hdr["BPA"]
+            value = f'{bmaj}\" X {bmin}\", {bpa} deg'
+            h = CARTA.HeaderEntry()
+            h.name = "Restoring beam"
+            h.value = value
+            computed_entries.append(h)
+        except KeyError:
+            pass
 
     # Not implement yet
     h = CARTA.HeaderEntry()
@@ -291,14 +304,31 @@ def get_file_info_extended(headers, file_name):
     fex_dict = {}
 
     for hdu_index, hdr in enumerate(headers):
-        if hdr['NAXIS'] == 0:
+        if hdr["NAXIS"] == 0:
             continue
+
+        xtension = hdr.get("XTENSION", "").strip()
+        if xtension in ["BINTABLE", "TABLE"]:
+            continue
+
+        axes_dict = get_axes_dict(hdr)
+
         fex = CARTA.FileInfoExtended()
-        fex.dimensions = hdr['NAXIS']
-        fex.width = hdr['NAXIS1']
-        fex.height = hdr['NAXIS2']
-        fex.depth = hdr.get('NAXIS3', 1)
-        fex.stokes = hdr.get('NAXIS4', 1)
+        fex.dimensions = hdr["NAXIS"]
+        fex.width = hdr["NAXIS1"]
+        fex.height = hdr["NAXIS2"]
+        if "FREQ" in axes_dict:
+            n = axes_dict["FREQ"] + 1
+            depth = hdr.get(f"NAXIS{n}", 1)
+        else:
+            depth = 1
+        fex.depth = depth
+        if "STOKES" in axes_dict:
+            n = axes_dict["STOKES"] + 1
+            stokes = hdr.get(f"NAXIS{n}", 1)
+        else:
+            stokes = 1
+        fex.stokes = stokes
         # fex.stokes_vals
 
         header_entries = get_header_entries(hdr)
@@ -307,15 +337,16 @@ def get_file_info_extended(headers, file_name):
         computed_entries = get_computed_entries(hdr, hdu_index, file_name)
         fex.computed_entries.extend(computed_entries)
 
-        # Not implemented yet
         a = CARTA.AxesNumbers()
         a.spatial_x = 1
         a.spatial_y = 2
-        if "NAXIS3" in hdr:
-            a.spectral = 3
-            a.depth = 3
-        if "NAXIS4" in hdr:
-            a.stokes = 4
+        if "FREQ" in axes_dict:
+            n = axes_dict["FREQ"] + 1
+            a.spectral = n
+            a.depth = n
+        if "STOKES" in axes_dict:
+            n = axes_dict["STOKES"] + 1
+            a.stokes = n
         fex.axes_numbers.CopyFrom(a)
 
         fex_dict[str(hdu_index)] = fex
@@ -532,18 +563,63 @@ def get_header_from_xradio_old(xarr):
     return hdr
 
 
-def load_fits_data(data, channel=None, stokes=None):
-    if channel is None:
-        channel = slice(channel)
-    if stokes is None:
-        stokes = slice(stokes)
-    ndim = data.ndim
-    if ndim == 3:
-        data = data[channel]
-    elif ndim == 4:
-        data = data[stokes][channel]
-    # data = data.astype('<f4')
-    return data
+def load_fits_data(
+    data: Union[np.ndarray, da.Array],
+    wcs: WCS,
+    channel=None,
+    stokes=None
+) -> Union[np.ndarray, da.Array]:
+    """
+    Load data from a FITS array with proper slicing based on WCS coordinates.
+
+    Parameters
+    ----------
+    data : Union[np.ndarray, da.Array]
+        The input data array (numpy or dask)
+    wcs : WCS
+        The WCS object containing coordinate information
+    channel : int, slice, or None
+        Channel index or slice to select. If None, all channels are selected.
+    stokes : int, slice, or None
+        Stokes index or slice to select. If None, all stokes are selected.
+
+    Returns
+    -------
+    Union[np.ndarray, da.Array]
+        The sliced data array
+    """
+    # Convert None to slice(None) for proper indexing
+    channel_slice = slice(None) if channel is None else channel
+    stokes_slice = slice(None) if stokes is None else stokes
+
+    # Get coordinate types from WCS
+    ctypes = [ctype.upper() for ctype in wcs.wcs.ctype]
+
+    # Create a mapping of coordinate types to their corresponding slices
+    slice_map = {}
+    for i, ctype in enumerate(ctypes):
+        if ctype.startswith("RA") or ctype.startswith("DEC"):
+            # Always select all spatial dimensions
+            slice_map[i] = slice(None)
+        elif ctype.startswith("FREQ"):
+            slice_map[i] = channel_slice
+        elif ctype.startswith("STOKES"):
+            slice_map[i] = stokes_slice
+
+    # Create a tuple of slices in the correct order for the data dimensions
+    # FITS data has dimensions reversed compared to WCS (fastest varying last)
+    slices = [slice(None)] * data.ndim
+    wcs_dims = len(ctypes)
+
+    # Map WCS dimensions to data array dimensions
+    for wcs_axis, data_slice in slice_map.items():
+        # Convert from FITS/WCS axis ordering to numpy/data axis ordering
+        data_axis = wcs_dims - 1 - wcs_axis
+        if data_axis < data.ndim:
+            slices[data_axis] = data_slice
+
+    # Apply the slices to the data
+    return data[tuple(slices)]
 
 
 async def async_load_xradio_data(
@@ -565,14 +641,17 @@ def load_xradio_data(ds, channel=None, stokes=None, time=0):
     if stokes is None:
         stokes = slice(stokes)
     data = ds['SKY'].isel(
-        frequency=channel, polarization=stokes, time=time)
+        frequency=channel, polarization=stokes, time=time
+    )
     return data.data
 
 
-def load_data(data, channel=None, stokes=None, time=0) -> Optional[da.Array]:
+def load_data(
+    data, channel=None, stokes=None, time=0, wcs=None
+) -> Optional[da.Array]:
     # Dask array from FITS
     if isinstance(data, da.Array) or isinstance(data, np.ndarray):
-        return load_fits_data(data, channel, stokes)
+        return load_fits_data(data, wcs, channel, stokes)
     # Xarary Dataset from Xradio
     elif isinstance(data, Dataset):
         return load_xradio_data(data, channel, stokes, time)

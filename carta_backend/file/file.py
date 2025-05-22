@@ -1,15 +1,17 @@
 import os
+import warnings
 from dataclasses import dataclass
 from glob import glob
 from time import perf_counter_ns
 from typing import Tuple
 
-import astropy.io.fits as fits
 import dask
 import dask.array as da
 import numpy as np
 import psutil
+from astropy.io import fits
 from astropy.nddata import block_reduce
+from astropy.utils.exceptions import FITSFixedWarning
 from astropy.wcs import WCS
 from xarray import Dataset, open_zarr
 
@@ -29,6 +31,7 @@ ptlog = logger.bind(name="Protocol")
 class FileData:
     data: np.ndarray | da.Array | Dataset
     header: fits.Header
+    wcs: WCS
     file_type: int
     hdu_index: int
     img_shape: Tuple[int, int]
@@ -108,7 +111,8 @@ class FileManager:
             else:
                 data = self.files[file_id].data
 
-            data = load_data(data, channel, stokes, time)
+            wcs = self.files[file_id].wcs
+            data = load_data(data, channel, stokes, time, wcs)
 
         if mip > 1:
             if isinstance(data, da.Array):
@@ -118,8 +122,10 @@ class FileManager:
                     {0: mip, 1: mip},
                     trim_excess=True)
             elif isinstance(data, np.ndarray):
-                data = block_reduce(
-                    data, (mip, mip), getattr(np, coarsen_func))
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
+                    data = block_reduce(
+                        data, (mip, mip), getattr(np, coarsen_func))
         else:
             if isinstance(data, np.ndarray) and use_memmap:
                 data = data[:]
@@ -319,9 +325,14 @@ def get_fits_FileData(file_id, file_path, hdu_index):
 
     memmap = fits.getdata(file_path, hdu_index, memmap=True)
 
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        wcs = WCS(header)
+
     filedata = FileData(
         data=data,
         header=header,
+        wcs=wcs,
         file_type=CARTA.FileType.FITS,
         hdu_index=hdu_index,
         img_shape=img_shape,
@@ -366,9 +377,14 @@ async def get_zarr_FileData(file_id, file_path, client=None):
             factor *= v
     frame_size = data_size / factor
 
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        wcs = WCS(header)
+
     filedata = FileData(
         data=data,
         header=header,
+        wcs=wcs,
         file_type=CARTA.FileType.CASA,
         hdu_index=None,
         img_shape=img_shape,
