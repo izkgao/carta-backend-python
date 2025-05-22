@@ -11,8 +11,7 @@ import numpy as np
 import psutil
 from astropy.io import fits
 from astropy.nddata import block_reduce
-from astropy.utils.exceptions import FITSFixedWarning
-from astropy.wcs import WCS
+from astropy.wcs import WCS, FITSFixedWarning
 from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
