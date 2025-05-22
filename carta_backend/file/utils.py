@@ -642,7 +642,7 @@ def load_xradio_data(ds, channel=None, stokes=None, time=0):
         stokes = slice(stokes)
     data = ds['SKY'].isel(
         frequency=channel, polarization=stokes, time=time
-    )
+    ).transpose("m", "l")
     return data.data
 
 
