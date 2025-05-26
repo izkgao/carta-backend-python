@@ -328,6 +328,9 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         warnings.simplefilter("ignore", FITSFixedWarning)
         wcs = WCS(header)
 
+    header["PIX_AREA"] = np.abs(
+        np.linalg.det(wcs.celestial.pixel_scale_matrix))
+
     filedata = FileData(
         data=data,
         header=header,

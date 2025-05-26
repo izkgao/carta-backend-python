@@ -95,9 +95,9 @@ def rasterize_chunk(block_data, block_info=None, region=None):
 
 
 def get_fluxdensity(x, axis=None, hdr=None):
-    beam_area = np.pi * hdr['BMAJ'] * hdr['BMIN'] / (4 * np.log(2))
-    beam_area /= hdr['PIXEL_AREA']
-    return da.nansum(x, axis=axis) / beam_area  # Why divide?
+    beam_area = np.pi * hdr["BMAJ"] * hdr["BMIN"] / (4 * np.log(2))
+    beam_area /= hdr["PIX_AREA"]
+    return da.nansum(x, axis=axis) / beam_area
 
 
 def get_rms(x, axis=None):
