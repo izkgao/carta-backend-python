@@ -65,6 +65,9 @@ class Session:
         # FileList
         self.flag_stop_file_list = False
 
+        # Histogram
+        self.hist_events = {}
+
         # Tiles
         self.tile_futures = {}
         self.priority_counter = itertools.count()
@@ -399,6 +402,7 @@ class Session:
 
         # If file is open, close it
         self.fm.close(file_id)
+        del self.hist_events[file_id]
 
         return None
 
@@ -446,6 +450,7 @@ class Session:
         await self.queue.put(message)
 
         # RegionHistogramData
+        self.hist_events[file_id] = asyncio.Event()
         await self.send_RegionHistogramData(
             request_id=0,
             file_id=file_id,
@@ -514,6 +519,8 @@ class Session:
         pflog.debug(msg)
 
         await self.queue.put(message)
+
+        self.hist_events[file_id].set()
 
         return None
 
@@ -735,6 +742,11 @@ class Session:
 
         # Set parameters
         tiles = list(tiles)
+
+        # Check if histogram is sent
+        await self.hist_events[file_id].wait()
+        # This is to switch the event loop to send the histogram
+        await asyncio.sleep(0)
 
         # RasterTile
         await self.send_RasterTileSync(
