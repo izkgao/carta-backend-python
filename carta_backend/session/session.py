@@ -402,7 +402,9 @@ class Session:
 
         # If file is open, close it
         self.fm.close(file_id)
-        del self.hist_events[file_id]
+        if file_id in self.hist_events:
+            self.hist_events[file_id].clear()
+            del self.hist_events[file_id]
 
         return None
 
