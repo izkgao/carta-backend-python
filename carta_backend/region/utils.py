@@ -22,6 +22,21 @@ def get_rectangle(region_info):
     return rect
 
 
+def is_box(polygon, tol=1e-8):
+    if not polygon.is_valid or polygon.is_empty:
+        return False
+
+    # Check if it has 5 points (including repeated first point)
+    coords = list(polygon.exterior.coords)
+    if len(coords) != 5:
+        return False
+
+    # Create a box using bounds
+    box = shapely.box(*polygon.bounds)
+
+    return polygon.equals_exact(box, tolerance=tol)
+
+
 def get_point(region_info):
     points = region_info.control_points
     x, y = points[0].x, points[0].y
@@ -120,6 +135,9 @@ def get_spectral_profile(data, mask, stats_type, hdr=None):
 def get_spectral_profile_dask(data, region, stats_type, hdr=None):
     if isinstance(region, shapely.Point):
         return data[:, region.y, region.x].astype('<f8')
+    elif is_box(region):
+        minx, miny, maxx, maxy = [int(i) for i in region.bounds]
+        return data[:, miny:maxy+1, minx:maxx+1].astype('<f8')
     mask = data[0].map_blocks(
         rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8))
     mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
