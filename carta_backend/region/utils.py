@@ -135,13 +135,14 @@ def get_spectral_profile(data, mask, stats_type, hdr=None):
 def get_spectral_profile_dask(data, region, stats_type, hdr=None):
     if isinstance(region, shapely.Point):
         return data[:, region.y, region.x].astype('<f8')
-    elif is_box(region):
+    if is_box(region):
         minx, miny, maxx, maxy = [int(i) for i in region.bounds]
-        return data[:, miny:maxy+1, minx:maxx+1].astype('<f8')
-    mask = data[0].map_blocks(
-        rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8))
-    mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
-    mdata = da.where(mask_3d, data, da.nan)
+        mdata = data[:, miny:maxy+1, minx:maxx+1].astype('<f8')
+    else:
+        mask = data[0].map_blocks(
+            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8))
+        mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
+        mdata = da.where(mask_3d, data, da.nan)
     kwargs = {"axis": (1, 2)}
     if stats_type == 3:
         kwargs["hdr"] = hdr
