@@ -19,21 +19,68 @@ ptlog = logger.bind(name="Protocol")
 
 def get_file_type(path: Union[str, Path]) -> int:
     extension = os.path.splitext(path)[1].lower()
-    if extension in ['.fits', '.fit', '.fts']:
+    if extension in [".fits", ".fit", ".fts"]:
         return CARTA.FileType.FITS
-    elif extension in ['.hdf5', '.h5']:
+    elif extension in [".hdf5", ".h5"]:
         return CARTA.FileType.HDF5
-    elif extension in ['.zarr']:
+    elif extension in [".zarr"]:
         return CARTA.FileType.CASA
+    elif extension in [".crtf"]:
+        return CARTA.FileType.CRTF
+    elif extension in [".reg"]:
+        return CARTA.FileType.DS9_REG
     else:
         return CARTA.FileType.UNKNOWN
 
 
-def get_file_info(path: Union[str, Path]) -> CARTA.FileInfo:
+def get_region_file_type(path: Union[str, Path]) -> int:
+    with open(path, "r") as f:
+        try:
+            first_line = f.readline().strip()
+        except UnicodeDecodeError:
+            return CARTA.FileType.UNKNOWN
+
+    if "#CRTF" in first_line:
+        file_type = CARTA.FileType.CRTF
+    elif "# Region file format: DS9" in first_line:
+        file_type = CARTA.FileType.DS9_REG
+    else:
+        file_type = CARTA.FileType.UNKNOWN
+    return file_type
+
+
+def is_zarr(path: Union[str, Path]) -> bool:
+    # Check if path is a folder and .zattrs exists
+    if os.path.isdir(path):
+        return os.path.exists(os.path.join(path, ".zattrs"))
+    return False
+
+
+def is_casa(path: Union[str, Path]) -> bool:
+    # Check if path is a folder and table.lock exists
+    if os.path.isdir(path):
+        return os.path.exists(os.path.join(path, "table.lock"))
+    return False
+
+
+def is_accessible(path: Union[str, Path]) -> bool:
+    if isinstance(path, str):
+        path = Path(path)
+    try:
+        path.is_dir()
+        return True
+    except (PermissionError, OSError, TimeoutError):
+        return False
+
+
+def get_file_info(
+    path: str | Path, file_type: int | None = None
+) -> CARTA.FileInfo:
     file_info = CARTA.FileInfo()
     file_info.name = os.path.basename(path)
 
-    file_type = get_file_type(path)
+    if file_type is None:
+        file_type = get_file_type(path)
     file_info.type = file_type
 
     try:

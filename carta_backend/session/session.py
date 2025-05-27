@@ -17,8 +17,11 @@ from carta_backend import proto as CARTA
 from carta_backend.config.config import ICD_VERSION
 from carta_backend.file import (FileManager, get_directory_info, get_file_info,
                                 get_file_info_extended, get_header_from_xradio)
+from carta_backend.file.utils import (get_region_file_type, is_accessible,
+                                      is_casa, is_zarr)
 from carta_backend.log import logger
 from carta_backend.region import get_region, get_spectral_profile_dask
+from carta_backend.region.utils import parse_region
 from carta_backend.tile import (decode_tile_coord, get_nan_encodings_block,
                                 get_tile_slice)
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
@@ -42,6 +45,10 @@ class Session:
         8: "do_SetSpatialRequirements",
         14: "do_SetSpectralRequirements",
         11: "do_SetRegion",
+        33: "do_RegionListRequest",
+        35: "do_RegionFileInfoRequest",
+        37: "do_ImportRegion",
+        12: "do_RemoveRegion",
     }
 
     def __init__(
@@ -242,13 +249,6 @@ class Session:
         else:
             parent = str(parent.relative_to(self.top_level_folder))
         response.parent = parent
-
-        def is_accessible(path):
-            try:
-                path.is_dir()
-                return True
-            except (PermissionError, OSError, TimeoutError):
-                return False
 
         # Check if directory is accessible
         if not is_accessible(directory):
@@ -1284,5 +1284,186 @@ class Session:
                     y=y
                 )
             )
+
+        return None
+
+    async def do_RegionListRequest(self, message: bytes) -> None:
+        # Decode message
+        event_type, request_id, obj = self.decode_message(message)
+
+        # Extract parameters
+        directory = obj.directory
+        # filter_mode = obj.filter_mode
+
+        # Set directory
+        if directory == "$BASE":
+            directory = self.starting_folder
+        else:
+            directory = self.top_level_folder / directory
+
+        # Create response object
+        resp = CARTA.RegionListResponse()
+        resp.directory = str(directory.relative_to(self.top_level_folder))
+        parent = directory.parent
+        if parent == self.top_level_folder:
+            parent = ""
+        else:
+            parent = str(parent.relative_to(self.top_level_folder))
+        resp.parent = parent
+
+        # Check if directory is accessible
+        if not is_accessible(directory):
+            resp.success = False
+            msg = f"Directory '{directory}' is not accessible"
+            resp.message = msg
+            event_type = CARTA.EventType.REGION_LIST_RESPONSE
+            message = self.encode_message(event_type, request_id, resp)
+            await self.queue.put(message)
+            return None
+
+        # Lists of files and directories
+        files = []
+        subdirectories = []
+
+        # Get total items
+        items = os.listdir(directory)
+
+        try:
+            for item in items:
+                # Full path of item
+                item_path = directory / item
+
+                # Check if item is accessible
+                if not is_accessible(item_path):
+                    continue
+
+                # If item is a directory
+                if item_path.is_dir():
+                    # Skip hidden directories
+                    if item.startswith("."):
+                        continue
+                    # Skip Zarr and CASA
+                    elif is_zarr(item_path) or is_casa(item_path):
+                        continue
+                    else:
+                        dir_info = get_directory_info(item_path)
+                        subdirectories.append(dir_info)
+                # If item is a file
+                else:
+                    # Skip hidden files
+                    if item.startswith("."):
+                        continue
+
+                    # Check file type
+                    file_type = get_region_file_type(item_path)
+
+                    if file_type == CARTA.FileType.UNKNOWN:
+                        continue
+
+                    file_info = get_file_info(item_path, file_type)
+                    files.append(file_info)
+
+            resp.files.extend(files)
+            resp.subdirectories.extend(subdirectories)
+            resp.success = True
+
+        except Exception as e:
+            resp.success = False
+            resp.message = f"Error listing directory: {str(e)}"
+            clog.error(f"Error in do_FileListRequest: {str(e)}")
+
+        # Send message
+        event_type = CARTA.EventType.REGION_LIST_RESPONSE
+        message = self.encode_message(event_type, request_id, resp)
+        await self.queue.put(message)
+        return None
+
+    async def do_RegionFileInfoRequest(self, message: bytes) -> None:
+        # Decode message
+        event_type, request_id, obj = self.decode_message(message)
+
+        # Extract parameters
+        directory = obj.directory
+        file = obj.file
+
+        # Set parameters
+        directory = self.top_level_folder / directory
+        file_path = str(directory / file)
+
+        # Get file info
+        file_type = get_region_file_type(file_path)
+        file_info = get_file_info(file_path, file_type)
+
+        # Create response object
+        resp = CARTA.RegionFileInfoResponse()
+        resp.success = True
+        resp.file_info.CopyFrom(file_info)
+
+        # Read region file content
+        with open(file_path, "r") as f:
+            contents = f.readlines()
+
+        for i, v in enumerate(contents):
+            contents[i] = v.strip("\n")
+
+        resp.contents.extend(contents)
+
+        # Send message
+        event_type = CARTA.EventType.REGION_FILE_INFO_RESPONSE
+        message = self.encode_message(event_type, request_id, resp)
+        await self.queue.put(message)
+        return None
+
+    async def do_ImportRegion(self, message: bytes) -> None:
+        # Decode message
+        event_type, request_id, obj = self.decode_message(message)
+
+        # Extract parameters
+        group_id = obj.group_id
+        file_type = obj.type
+        directory = obj.directory
+        file = obj.file
+        # contents = obj.contents
+
+        # Set parameters
+        directory = self.top_level_folder / directory
+        file_path = str(directory / file)
+
+        # Create response object
+        resp = CARTA.ImportRegionAck()
+        resp.success = True
+
+        # Add regions
+        regions = parse_region(file_path, file_type)
+        async with self.lock:
+            keys = list(self.region_dict.keys())
+            max_id = max(keys) if keys else 0
+            for region_info, region_style in regions:
+                max_id += 1
+                self.region_dict[max_id] = {
+                    "file_id": group_id,
+                    "region_info": region_info,
+                    "preview_region": None
+                }
+                resp.regions[max_id].CopyFrom(region_info)
+                resp.region_styles[max_id].CopyFrom(region_style)
+
+        # Send message
+        event_type = CARTA.EventType.IMPORT_REGION_ACK
+        message = self.encode_message(event_type, request_id, resp)
+        await self.queue.put(message)
+        return None
+
+    async def do_RemoveRegion(self, message: bytes) -> None:
+        # Decode message
+        event_type, request_id, obj = self.decode_message(message)
+
+        # Extract parameters
+        region_id = obj.region_id
+
+        # Remove region
+        async with self.lock:
+            if region_id in self.region_dict:
+                del self.region_dict[region_id]
 
         return None

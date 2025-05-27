@@ -1,3 +1,5 @@
+import re
+
 import dask.array as da
 import numpy as np
 import shapely
@@ -148,3 +150,76 @@ def get_spectral_profile_dask(data, region, stats_type, hdr=None):
         kwargs["hdr"] = hdr
     spec_profile = STATS_FUNCS[stats_type](mdata, **kwargs)
     return spec_profile.astype('<f8')
+
+
+def parse_region(file_path, file_type):
+    if file_type == CARTA.FileType.DS9_REG:
+        # Not implemented
+        return None
+    elif file_type == CARTA.FileType.CRTF:
+        return parse_crtf(file_path)
+    else:
+        return None
+
+
+def parse_crtf_centerbox_string(s):
+    result = {}
+
+    # Match the centerbox and extract numbers
+    shape_match = re.search(
+        r'centerbox\s*\[\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\],\s*'
+        r'\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\]\]',
+        s
+    )
+
+    if shape_match:
+        result["center"] = [float(shape_match.group(1)),
+                            float(shape_match.group(2))]
+        result["width"] = [float(shape_match.group(3)),
+                           float(shape_match.group(4))]
+
+    # Match all key=value pairs
+    kv_pairs = re.findall(r'(\w+)=([\w\-.]+)', s)
+    for key, value in kv_pairs:
+        # Try to convert value to float or int if possible
+        try:
+            num_val = float(value)
+            if num_val.is_integer():
+                num_val = int(num_val)
+            result[key] = num_val
+        except ValueError:
+            result[key] = value
+
+    center = CARTA.Point(x=result["center"][0], y=result["center"][1])
+    width = CARTA.Point(x=result["width"][0], y=result["width"][1])
+
+    region_info = CARTA.RegionInfo()
+    region_info.region_type = CARTA.RegionType.RECTANGLE
+    region_info.control_points.append(center)
+    region_info.control_points.append(width)
+
+    region_style = CARTA.RegionStyle()
+    if "color" in result:
+        color = result["color"].upper()
+        if not color.startswith("#"):
+            color = "#" + color
+        region_style.color = color
+    if "linewidth" in result:
+        region_style.line_width = result["linewidth"]
+
+    region_style.dash_list.append(0)
+
+    return region_info, region_style
+
+
+def parse_crtf(file_path):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    region_list = []
+
+    # Only centerbox is supported now
+    for line in lines:
+        if line.startswith("centerbox"):
+            region_list.append(parse_crtf_centerbox_string(line))
+    return region_list
