@@ -202,8 +202,6 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
     """
     Create a Dask array from raw binary data in :code:`filename`
     by memory mapping.
-    This method creates a dask array with the same chunking pattern as
-    da.ones(shape, dtype=dtype), and works for arrays of any dimensionality.
 
     Parameters
     ----------
@@ -214,69 +212,32 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
         NumPy dtype of the data in the file
     offset : int, optional
         Skip :code:`offset` bytes from the beginning of the file.
-    chunks : int, tuple
-        How to chunk the array
+    chunks : int, tuple, optional
+        How to chunk the array. If "auto", use dask's default chunking.
 
     Returns
     -------
     dask.array.Array
         Dask array matching :code:`shape` and :code:`dtype`, backed by
-        memory-mapped chunks with the same chunking as
-        da.ones(shape, dtype=dtype).
+        memory-mapped data and chunked according to ``chunks``.
     """
-    # Create a sample array to get the default chunking
-    sample_array = da.empty(shape, dtype=dtype, chunks=chunks)
-    chunks = sample_array.chunks
-
     # Special case for 0-dimensional arrays
     if len(shape) == 0:
         delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, ())
         return da.from_delayed(delayed_chunk, shape=(), dtype=dtype)
 
-    # Calculate the chunk indices for each dimension
-    chunk_indices = []
-    for dim_chunks in chunks:
-        indices = []
-        start = 0
-        for size in dim_chunks:
-            indices.append((start, start + size))
-            start += size
-        chunk_indices.append(indices)
+    # Define a loader function for each block using block information
+    def _load_block(_, block_info=None):
+        loc = block_info[0]["array-location"]
+        sl = tuple(slice(start, stop) for start, stop in loc)
+        return mmap_load_chunk(filename, shape, dtype, offset, sl)
 
-    # Function to build a block at specific chunk indices
-    def build_block(idx_tuple):
-        # Create slices from the chunk indices
-        slices = tuple(slice(start, stop) for start, stop in idx_tuple)
+    # Create a dummy array purely to define the chunk structure; its contents
+    # are never materialized because ``_load_block`` discards the input data.
+    dummy = da.empty(shape, dtype=dtype, chunks=chunks)
 
-        # Calculate the shape of this chunk
-        chunk_shape = tuple(stop - start for start, stop in idx_tuple)
-
-        # Create a delayed chunk
-        delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, slices)
-
-        # Create a dask array from the delayed chunk
-        return da.from_delayed(delayed_chunk, shape=chunk_shape, dtype=dtype)
-
-    # Create a nested list structure that matches the dimensionality of chunks
-    # This is a recursive function to handle any number of dimensions
-    def create_nested_blocks(dimension=0, indices=()):
-        if dimension == len(chunks):
-            # We've reached the right depth, build the block
-            return build_block(indices)
-        else:
-            # Create a list of blocks for this dimension
-            blocks_in_dim = []
-            for idx in chunk_indices[dimension]:
-                new_indices = indices + (idx,)
-                blocks_in_dim.append(
-                    create_nested_blocks(dimension + 1, new_indices))
-            return blocks_in_dim
-
-    # Create the nested structure of blocks
-    nested_blocks = create_nested_blocks()
-
-    # Combine all blocks using da.block
-    return da.block(nested_blocks)
+    # Map the loader function across all blocks to build the final Dask array.
+    return dummy.map_blocks(_load_block, dtype=dtype)
 
 
 def get_fits_FileData(file_id, file_path, hdu_index):
