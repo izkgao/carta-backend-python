@@ -70,18 +70,21 @@ class FileManager:
     async def get_slice(self, file_id, channel, stokes, time=0,
                         layer=None, mip=1, coarsen_func="nanmean",
                         use_memmap=False):
+        # Convert layer to mip
         if layer is not None:
             mip = layer_to_mip(
                 layer,
                 image_shape=self.files[file_id].img_shape,
                 tile_shape=TILE_SHAPE)
 
+        # Generate names
         name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
         frame_name = f"{file_id}_{channel}_{stokes}_{time}"
         clog.debug(f"Getting slice for {name}")
 
         clog.debug(f"Cache keys: {list(self.cache.keys())}")
 
+        # Check cache
         if name in list(self.cache.keys()):
             clog.debug(f"Using cached data for {name}")
             return self.cache[name]
@@ -93,6 +96,8 @@ class FileManager:
                     clog.debug(f"Clearing cache for {key}")
                     del self.cache[key]
 
+        # If the frame size is less than half of the available memory,
+        # load the full frame into memory
         frame_size = self.files[file_id].frame_size
         available_mem = psutil.virtual_memory().available / 1024**2
 
@@ -101,6 +106,7 @@ class FileManager:
 
         full_frame_name = f"{file_id}_{channel}_{stokes}_{time}_1"
 
+        # Check cache
         if full_frame_name in list(self.cache.keys()):
             clog.debug(f"Using cached data for {full_frame_name}")
             data = self.cache[full_frame_name]
@@ -113,6 +119,7 @@ class FileManager:
             wcs = self.files[file_id].wcs
             data = load_data(data, channel, stokes, time, wcs)
 
+        # Coarsen
         if mip > 1:
             if isinstance(data, da.Array):
                 data = da.coarsen(
@@ -129,12 +136,15 @@ class FileManager:
             if isinstance(data, np.ndarray) and use_memmap:
                 data = data[:]
 
+        # Convert to float32 to avoid using dtype >f4
         if isinstance(data, np.ndarray):
             data = data.astype("float32")
 
+        # Load data into memory
         if use_memmap and isinstance(data, da.Array):
             data = await self.client.compute(data)
 
+        # Cache data
         self.cache[name] = data
         return data
 

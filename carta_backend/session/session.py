@@ -472,7 +472,10 @@ class Session:
         stokes: int = 0,
         mip: int = 1,
     ) -> None:
-        """This only executes one time when the image is first loaded."""
+        """
+        This executes when the image is first loaded and
+        when channel/stokes changes.
+        """
         # Load image
         t0 = perf_counter_ns()
 
@@ -522,6 +525,7 @@ class Session:
 
         await self.queue.put(message)
 
+        # Mark histogram as ready
         self.hist_events[file_id].set()
 
         return None
@@ -566,6 +570,7 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
+            # Send full image
             data = await self.fm.get_slice(file_id, channel, stokes)
             if isinstance(data, da.Array):
                 data = await self.client.compute(data[:, :], priority=priority)
@@ -579,6 +584,7 @@ class Session:
                 stokes=stokes
             )
         else:
+            # Send tiles
             layer = decode_tile_coord(tiles[0])[2]
             data = await self.fm.get_slice(
                 file_id, channel, stokes, layer=layer)
