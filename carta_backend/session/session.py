@@ -15,15 +15,27 @@ from xarray import open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import ICD_VERSION
-from carta_backend.file import (FileManager, get_directory_info, get_file_info,
-                                get_file_info_extended, get_header_from_xradio)
-from carta_backend.file.utils import (get_region_file_type, is_accessible,
-                                      is_casa, is_zarr)
+from carta_backend.file import (
+    FileManager,
+    get_directory_info,
+    get_file_info,
+    get_file_info_extended,
+    get_header_from_xradio,
+)
+from carta_backend.file.utils import (
+    get_region_file_type,
+    is_accessible,
+    is_casa,
+    is_zarr,
+)
 from carta_backend.log import logger
 from carta_backend.region import get_region, get_spectral_profile_dask
 from carta_backend.region.utils import parse_region
-from carta_backend.tile import (decode_tile_coord, get_nan_encodings_block,
-                                get_tile_slice)
+from carta_backend.tile import (
+    decode_tile_coord,
+    get_nan_encodings_block,
+    get_tile_slice,
+)
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
 clog = logger.bind(name="CARTA")
@@ -52,12 +64,12 @@ class Session:
     }
 
     def __init__(
-            self,
-            session_id: int = 0,
-            top_level_folder: str = None,
-            starting_folder: str = None,
-            lock: asyncio.Lock = None,
-            client: Client = None,
+        self,
+        session_id: int = 0,
+        top_level_folder: str = None,
+        starting_folder: str = None,
+        lock: asyncio.Lock = None,
+        client: Client = None,
     ):
         self.session_id = session_id
         self.top_level_folder = Path(top_level_folder)
@@ -120,11 +132,7 @@ class Session:
         handler = getattr(self, handler)
         await handler(message)
 
-    def decode_message(
-            self,
-            message: bytes
-    ) -> Optional[Tuple[int, int, Any]]:
-
+    def decode_message(self, message: bytes) -> Optional[Tuple[int, int, Any]]:
         event_type = int.from_bytes(message[0:2], byteorder="little")
         # icd_version = int.from_bytes(message[2:4], byteorder="little")
         request_id = int.from_bytes(message[4:8], byteorder="little")
@@ -140,10 +148,7 @@ class Session:
         return event_type, request_id, obj
 
     def encode_message(
-            self,
-            event_type: int,
-            request_id: int,
-            obj: Any
+        self, event_type: int, request_id: int, obj: Any
     ) -> bytes:
         message = event_type.to_bytes(2, byteorder="little")
         message += ICD_VERSION.to_bytes(2, byteorder="little")
@@ -198,6 +203,7 @@ class Session:
         # and the performance will not be affected.
         from carta_backend.tile.utils import fill_nan_with_block_average
         from carta_backend.utils.histogram import get_histogram
+
         self.get_histogram = get_histogram
         self.fill_nan_with_block_average = fill_nan_with_block_average
         return None
@@ -280,7 +286,8 @@ class Session:
                         event_type = CARTA.EventType.FILE_LIST_RESPONSE
                         # Encode message
                         message = self.encode_message(
-                            event_type, request_id, response)
+                            event_type, request_id, response
+                        )
                         # Send message
                         await self.queue.put(message)
                         return None
@@ -454,11 +461,7 @@ class Session:
         # RegionHistogramData
         self.hist_events[file_id] = asyncio.Event()
         await self.send_RegionHistogramData(
-            request_id=0,
-            file_id=file_id,
-            region_id=-1,
-            channel=0,
-            stokes=0
+            request_id=0, file_id=file_id, region_id=-1, channel=0, stokes=0
         )
 
         return None
@@ -479,8 +482,7 @@ class Session:
         # Load image
         t0 = perf_counter_ns()
 
-        data = await self.fm.get_slice(
-            file_id, channel, stokes, mip=mip)
+        data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
 
         dt = (perf_counter_ns() - t0) / 1e6
 
@@ -540,7 +542,6 @@ class Session:
         channel: int = 0,
         stokes: int = 0,
     ) -> None:
-
         # RasterTileSync
         resp_sync = CARTA.RasterTileSync()
         resp_sync.file_id = file_id
@@ -581,13 +582,14 @@ class Session:
                 compression_type=compression_type,
                 compression_quality=compression_quality,
                 channel=channel,
-                stokes=stokes
+                stokes=stokes,
             )
         else:
             # Send tiles
             layer = decode_tile_coord(tiles[0])[2]
             data = await self.fm.get_slice(
-                file_id, channel, stokes, layer=layer)
+                file_id, channel, stokes, layer=layer
+            )
             image_shape = self.fm.files[file_id].img_shape
 
             if isinstance(data, da.Array):
@@ -597,7 +599,8 @@ class Session:
                     x, y, layer = decode_tile_coord(tile)
                     slicey, slicex = get_tile_slice(x, y, layer, image_shape)
                     future = self.client.compute(
-                        data[slicey, slicex], priority=priority)
+                        data[slicey, slicex], priority=priority
+                    )
                     futures[future] = (x, y, layer)
 
                 # async with self.lock:
@@ -617,14 +620,13 @@ class Session:
                                 stokes=stokes,
                                 x=x,
                                 y=y,
-                                layer=layer
+                                layer=layer,
                             )
                         )
             else:
                 async for tile in iter(tiles):
                     x, y, layer = decode_tile_coord(tile)
-                    slicey, slicex = get_tile_slice(
-                        x, y, layer, image_shape)
+                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
                     idata = data[slicey, slicex]
                     await self.send_RasterTileData(
                         request_id=request_id,
@@ -636,7 +638,7 @@ class Session:
                         stokes=stokes,
                         x=x,
                         y=y,
-                        layer=layer
+                        layer=layer,
                     )
 
         dt = (perf_counter_ns() - t0) / 1e6
@@ -668,7 +670,6 @@ class Session:
         y: int = None,
         layer: int = None,
     ) -> None:
-
         t0 = perf_counter_ns()
         tile_height, tile_width = data.shape
         nan_encodings = get_nan_encodings_block(data).tobytes()
@@ -692,9 +693,8 @@ class Session:
         t0 = perf_counter_ns()
         if compression_type == CARTA.CompressionType.ZFP:
             comp_data = zfpy.compress_numpy(
-                data,
-                precision=compression_quality,
-                write_header=False)
+                data, precision=compression_quality, write_header=False
+            )
         elif compression_type == CARTA.CompressionType.SZ:
             # Not implemented yet
             comp_data = data.tobytes()
@@ -764,7 +764,7 @@ class Session:
             compression_quality=compression_quality,
             tiles=tiles,
             channel=0,
-            stokes=0
+            stokes=0,
         )
 
         return None
@@ -796,7 +796,7 @@ class Session:
             file_id=file_id,
             region_id=-1,
             channel=channel,
-            stokes=stokes
+            stokes=stokes,
         )
 
         # RasterTile
@@ -807,7 +807,7 @@ class Session:
             compression_quality=compression_quality,
             tiles=tiles,
             channel=channel,
-            stokes=stokes
+            stokes=stokes,
         )
 
         return None
@@ -830,7 +830,9 @@ class Session:
             async with self.lock:
                 # [start, end, mip, width]
                 self.spat_dict[file_id] = {
-                    "x": [0, None, 1, 0], "y": [0, None, 1, 0]}
+                    "x": [0, None, 1, 0],
+                    "y": [0, None, 1, 0],
+                }
 
         to_send = False
 
@@ -879,7 +881,7 @@ class Session:
                 x=x,
                 y=y,
                 channel=channel,
-                stokes=stokes
+                stokes=stokes,
             )
 
         return None
@@ -925,7 +927,7 @@ class Session:
             y=y,
             channel=channel,
             stokes=stokes,
-            task_token=task_token
+            task_token=task_token,
         )
 
         # Send spectral profile
@@ -938,7 +940,7 @@ class Session:
                     x=x,
                     y=y,
                     stats_type=2,
-                    task_token=task_token
+                    task_token=task_token,
                 )
             )
 
@@ -958,7 +960,6 @@ class Session:
         region_id: int = None,
         task_token: str = None,
     ) -> None:
-
         t0 = perf_counter_ns()
 
         # Get data
@@ -986,11 +987,13 @@ class Session:
 
         if isinstance(data, da.Array):
             # Compute tasks
-            futures = self.client.compute([
-                data[my, mx],
-                data[my, slice_x].astype('<f4'),
-                data[slice_y, mx].astype('<f4')
-            ])
+            futures = self.client.compute(
+                [
+                    data[my, mx],
+                    data[my, slice_x].astype("<f4"),
+                    data[slice_y, mx].astype("<f4"),
+                ]
+            )
 
             # Check if this is still the current task before awaiting results
             async with self.lock:
@@ -1031,8 +1034,8 @@ class Session:
             y_profile = y_profile.tobytes()
         else:
             value = float(data[my, mx])
-            x_profile = data[my, slice_x].astype('<f4').tobytes()
-            y_profile = data[slice_y, mx].astype('<f4').tobytes()
+            x_profile = data[my, slice_x].astype("<f4").tobytes()
+            y_profile = data[slice_y, mx].astype("<f4").tobytes()
 
         resp = CARTA.SpatialProfileData()
         resp.file_id = file_id
@@ -1079,7 +1082,6 @@ class Session:
         stats_type: int = 2,
         task_token: str = None,
     ) -> None:
-
         t0 = perf_counter_ns()
 
         # Get data
@@ -1093,22 +1095,27 @@ class Session:
 
         if region_id == 0:
             # Cursor spectral profile
-            spec_profile = data[:, y, x].astype('<f4')
+            spec_profile = self.fm.get_point_spectrum(
+                file_id=file_id, x=x, y=y, channel=None, stokes=0, time=0
+            )
 
             # Compute the task
-            spec_profile = await self.compute_cursor_spectral_profile(
-                spec_profile, file_id, task_token)
+            if isinstance(spec_profile, da.Array):
+                spec_profile = await self.compute_cursor_spectral_profile(
+                    spec_profile, file_id, task_token
+                )
 
             if spec_profile is None:
                 return None
 
-            sp.raw_values_fp32 = spec_profile.tobytes()
+            sp.raw_values_fp32 = spec_profile.astype("float32").tobytes()
             msg_add = " cursor"
         else:
             # Region spectral profile
             region = get_region(region_info)
             spec_profile = get_spectral_profile_dask(
-                data, region, stats_type, hdr)
+                data, region, stats_type, hdr
+            )
 
             # Compute the task and get future
             future = self.client.compute(spec_profile)
@@ -1208,7 +1215,7 @@ class Session:
                 self.region_dict[region_id] = {
                     "file_id": file_id,
                     "region_info": region_info,
-                    "preview_region": preview_region
+                    "preview_region": preview_region,
                 }
             else:
                 self.region_dict[region_id]["region_info"] = region_info
@@ -1228,7 +1235,7 @@ class Session:
                 file_id,
                 region_id,
                 region_info,
-                stats_type=self.prev_stats_type
+                stats_type=self.prev_stats_type,
             )
 
         return None
@@ -1287,7 +1294,7 @@ class Session:
                     region_info=region_info,
                     stats_type=self.prev_stats_type,
                     x=x,
-                    y=y
+                    y=y,
                 )
             )
 
@@ -1449,7 +1456,7 @@ class Session:
                 self.region_dict[max_id] = {
                     "file_id": group_id,
                     "region_info": region_info,
-                    "preview_region": None
+                    "preview_region": None,
                 }
                 resp.regions[max_id].CopyFrom(region_info)
                 resp.region_styles[max_id].CopyFrom(region_style)

@@ -254,7 +254,7 @@ def get_computed_entries(hdr, hdu_index, file_name):
     try:
         h = CARTA.HeaderEntry()
         h.name = "Pixel increment"
-        h.value = f'{hdr["CDELT1"]*3600}\", {hdr["CDELT2"]*3600}\"'
+        h.value = f'{hdr["CDELT1"] * 3600}", {hdr["CDELT2"] * 3600}"'
         computed_entries.append(h)
     except KeyError:
         pass
@@ -262,7 +262,7 @@ def get_computed_entries(hdr, hdu_index, file_name):
     try:
         h = CARTA.HeaderEntry()
         h.name = "Pixel unit"
-        h.value = hdr['BUNIT']
+        h.value = hdr["BUNIT"]
         computed_entries.append(h)
     except KeyError:
         pass
@@ -302,7 +302,7 @@ def get_computed_entries(hdr, hdu_index, file_name):
             bmaj = hdr["BMAJ"] * 3600
             bmin = hdr["BMIN"] * 3600
             bpa = hdr["BPA"]
-            value = f'{bmaj}\" X {bmin}\", {bpa} deg'
+            value = f'{bmaj}" X {bmin}", {bpa} deg'
             h = CARTA.HeaderEntry()
             h.name = "Restoring beam"
             h.value = value
@@ -408,7 +408,8 @@ async def get_header_from_xradio(xarr, client=None):
         hdr = get_header_from_xradio_old(xarr)
     else:
         raise ValueError(
-            "Could not find direction information in Xradio dataset")
+            "Could not find direction information in Xradio dataset"
+        )
     return hdr
 
 
@@ -455,8 +456,10 @@ async def get_header_from_xradio_new(xarr, client=None):
         cdelt.append(1.0)
 
     # Get ctype
-    ctype = [f'RA---{wcs_dict["projection"]}',
-             f'DEC--{wcs_dict["projection"]}']
+    ctype = [
+        f"RA---{wcs_dict['projection']}",
+        f"DEC--{wcs_dict['projection']}",
+    ]
     if "frequency" in keys:
         ctype.append("FREQ")
     if "polarization" in keys:
@@ -486,13 +489,19 @@ async def get_header_from_xradio_new(xarr, client=None):
     wcs.pixel_shape = shape
 
     # Get header
-    bitpix_mapping = {"uint8": 8, "int16": 16, "int32": 32, "int64": 64,
-                      "float32": -32, "float64": -64}
+    bitpix_mapping = {
+        "uint8": 8,
+        "int16": 16,
+        "int32": 32,
+        "int64": 64,
+        "float32": -32,
+        "float64": -64,
+    }
     hdr = wcs.to_header()
     hdr["BITPIX"] = bitpix_mapping[xarr["SKY"].dtype.name]
     hdr["NAXIS"] = hdr["WCSAXES"]
     for i, v in enumerate(wcs.pixel_shape):
-        hdr[f"NAXIS{i+1}"] = v
+        hdr[f"NAXIS{i + 1}"] = v
     bunit = xarr["SKY"].units
     if isinstance(bunit, list):
         bunit = bunit[0]
@@ -505,10 +514,14 @@ async def get_header_from_xradio_new(xarr, client=None):
 
     if client is not None and client.asynchronous:
         beam = await client.compute(
-            xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data)
+            xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data
+        )
     else:
-        beam = xarr["BEAM"].isel(
-            time=0, frequency=0, polarization=0).data.compute()
+        beam = (
+            xarr["BEAM"]
+            .isel(time=0, frequency=0, polarization=0)
+            .data.compute()
+        )
     bmaj, bmin, bpa = np.rad2deg(beam)
     hdr["BMAJ"] = bmaj
     hdr["BMIN"] = bmin
@@ -559,8 +572,10 @@ def get_header_from_xradio_old(xarr):
         cdelt.append(1.0)
 
     # Get ctype
-    ctype = [f'RA---{wcs_dict["projection"]}',
-             f'DEC--{wcs_dict["projection"]}']
+    ctype = [
+        f"RA---{wcs_dict['projection']}",
+        f"DEC--{wcs_dict['projection']}",
+    ]
     if "frequency" in keys:
         ctype.append("FREQ")
     if "polarization" in keys:
@@ -590,13 +605,19 @@ def get_header_from_xradio_old(xarr):
     wcs.pixel_shape = shape
 
     # Get header
-    bitpix_mapping = {"uint8": 8, "int16": 16, "int32": 32, "int64": 64,
-                      "float32": -32, "float64": -64}
+    bitpix_mapping = {
+        "uint8": 8,
+        "int16": 16,
+        "int32": 32,
+        "int64": 64,
+        "float32": -32,
+        "float64": -64,
+    }
     hdr = wcs.to_header()
     hdr["BITPIX"] = bitpix_mapping[xarr["SKY"].dtype.name]
     hdr["NAXIS"] = hdr["WCSAXES"]
     for i, v in enumerate(wcs.pixel_shape):
-        hdr[f"NAXIS{i+1}"] = v
+        hdr[f"NAXIS{i + 1}"] = v
     hdr["BUNIT"] = xarr["SKY"].units[0]
     sky_attrs = xarr["SKY"].direction_info["reference"]["attrs"]
     freq_attrs = xarr["frequency"].reference_value["attrs"]
@@ -613,8 +634,10 @@ def get_header_from_xradio_old(xarr):
 def load_fits_data(
     data: Union[np.ndarray, da.Array],
     wcs: WCS,
+    x=None,
+    y=None,
     channel=None,
-    stokes=None
+    stokes=None,
 ) -> Union[np.ndarray, da.Array]:
     """
     Load data from a FITS array with proper slicing based on WCS coordinates.
@@ -625,6 +648,10 @@ def load_fits_data(
         The input data array (numpy or dask)
     wcs : WCS
         The WCS object containing coordinate information
+    x : int, slice, or None
+        X index or slice to select. If None, all x are selected.
+    y : int, slice, or None
+        Y index or slice to select. If None, all y are selected.
     channel : int, slice, or None
         Channel index or slice to select. If None, all channels are selected.
     stokes : int, slice, or None
@@ -636,6 +663,8 @@ def load_fits_data(
         The sliced data array
     """
     # Convert None to slice(None) for proper indexing
+    x_slice = slice(None) if x is None else x
+    y_slice = slice(None) if y is None else y
     channel_slice = slice(None) if channel is None else channel
     stokes_slice = slice(None) if stokes is None else stokes
 
@@ -645,9 +674,10 @@ def load_fits_data(
     # Create a mapping of coordinate types to their corresponding slices
     slice_map = {}
     for i, ctype in enumerate(ctypes):
-        if ctype.startswith("RA") or ctype.startswith("DEC"):
-            # Always select all spatial dimensions
-            slice_map[i] = slice(None)
+        if ctype.startswith("RA"):
+            slice_map[i] = x_slice
+        elif ctype.startswith("DEC"):
+            slice_map[i] = y_slice
         elif ctype.startswith("FREQ"):
             slice_map[i] = channel_slice
         elif ctype.startswith("STOKES"):
@@ -670,38 +700,44 @@ def load_fits_data(
 
 
 async def async_load_xradio_data(
-        data, channel=None, stokes=None, time=0, client=None):
+    data, channel=None, stokes=None, time=0, client=None
+):
     if channel is None:
         channel = slice(channel)
     if stokes is None:
         stokes = slice(stokes)
-    data = data['SKY'].isel(
-        frequency=channel, polarization=stokes, time=time)
+    data = data["SKY"].isel(frequency=channel, polarization=stokes, time=time)
     if client is not None:
         data = await client.compute(data)
     return data.data
 
 
-def load_xradio_data(ds, channel=None, stokes=None, time=0):
+def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0):
     if channel is None:
         channel = slice(channel)
     if stokes is None:
         stokes = slice(stokes)
-    data = ds['SKY'].isel(
-        frequency=channel, polarization=stokes, time=time
-    ).transpose(..., "m", "l")
+    data = (
+        ds["SKY"]
+        .isel(frequency=channel, polarization=stokes, time=time)
+        .transpose(..., "m", "l")
+    )
+    if x is not None:
+        data = data.isel(l=x)
+    if y is not None:
+        data = data.isel(m=y)
     return data.data
 
 
 def load_data(
-    data, channel=None, stokes=None, time=0, wcs=None
+    data, x=None, y=None, channel=None, stokes=None, time=0, wcs=None
 ) -> Optional[da.Array]:
     # Dask array from FITS
     if isinstance(data, da.Array) or isinstance(data, np.ndarray):
-        return load_fits_data(data, wcs, channel, stokes)
-    # Xarary Dataset from Xradio
+        return load_fits_data(data, wcs, x, y, channel, stokes)
+    # Xarray Dataset from Xradio
     elif isinstance(data, Dataset):
-        return load_xradio_data(data, channel, stokes, time)
+        return load_xradio_data(data, x, y, channel, stokes, time)
     else:
         clog.error(f"Unsupported data type: {type(data)}")
         return None

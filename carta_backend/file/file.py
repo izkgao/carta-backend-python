@@ -16,8 +16,11 @@ from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
-from carta_backend.file.utils import (get_file_type, get_header_from_xradio,
-                                      load_data)
+from carta_backend.file.utils import (
+    get_file_type,
+    get_header_from_xradio,
+    load_data,
+)
 from carta_backend.log import logger
 from carta_backend.tile import layer_to_mip
 
@@ -67,15 +70,24 @@ class FileManager:
             return None
         return self.files[file_id]
 
-    async def get_slice(self, file_id, channel, stokes, time=0,
-                        layer=None, mip=1, coarsen_func="nanmean",
-                        use_memmap=False):
+    async def get_slice(
+        self,
+        file_id,
+        channel,
+        stokes,
+        time=0,
+        layer=None,
+        mip=1,
+        coarsen_func="nanmean",
+        use_memmap=False,
+    ):
         # Convert layer to mip
         if layer is not None:
             mip = layer_to_mip(
                 layer,
                 image_shape=self.files[file_id].img_shape,
-                tile_shape=TILE_SHAPE)
+                tile_shape=TILE_SHAPE,
+            )
 
         # Generate names
         name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
@@ -117,7 +129,15 @@ class FileManager:
                 data = self.files[file_id].data
 
             wcs = self.files[file_id].wcs
-            data = load_data(data, channel, stokes, time, wcs)
+            data = load_data(
+                data=data,
+                x=None,
+                y=None,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                wcs=wcs,
+            )
 
         # Coarsen
         if mip > 1:
@@ -126,12 +146,14 @@ class FileManager:
                     getattr(da, coarsen_func),
                     data,
                     {0: mip, 1: mip},
-                    trim_excess=True)
+                    trim_excess=True,
+                )
             elif isinstance(data, np.ndarray):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", category=RuntimeWarning)
                     data = block_reduce(
-                        data, (mip, mip), getattr(np, coarsen_func))
+                        data, (mip, mip), getattr(np, coarsen_func)
+                    )
         else:
             if isinstance(data, np.ndarray) and use_memmap:
                 data = data[:]
@@ -146,6 +168,20 @@ class FileManager:
 
         # Cache data
         self.cache[name] = data
+        return data
+
+    def get_point_spectrum(self, file_id, x, y, channel, stokes, time=0):
+        data = self.files[file_id].memmap
+        wcs = self.files[file_id].wcs
+        data = load_data(
+            data=data,
+            x=x,
+            y=y,
+            channel=channel,
+            stokes=stokes,
+            time=time,
+            wcs=wcs,
+        )
         return data
 
     def close(self, file_id):
@@ -203,8 +239,9 @@ def mmap_load_chunk(filename, shape, dtype, offset, sl):
         View into memory map created by indexing with :code:`sl`,
         or NumPy ndarray in case no view can be created using :code:`sl`.
     """
-    data = np.memmap(filename, mode='r', shape=shape,
-                     dtype=dtype, offset=offset)
+    data = np.memmap(
+        filename, mode="r", shape=shape, dtype=dtype, offset=offset
+    )
     return data[sl]
 
 
@@ -254,7 +291,8 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
             for idx in chunk_indices[dimension]:
                 new_indices = indices + (idx,)
                 blocks_in_dim.append(
-                    create_nested_blocks(dimension + 1, new_indices))
+                    create_nested_blocks(dimension + 1, new_indices)
+                )
             return blocks_in_dim
 
     # Create the nested structure of blocks
@@ -296,16 +334,15 @@ def get_fits_FileData(file_id, file_path, hdu_index):
 
     # Get and set image information
     wcs = WCS(header, fix=False)
-    header["PIX_AREA"] = np.abs(np.linalg.det(
-        wcs.celestial.pixel_scale_matrix))
+    header["PIX_AREA"] = np.abs(
+        np.linalg.det(wcs.celestial.pixel_scale_matrix)
+    )
     img_shape = shape[-2:]
     data_size = data.nbytes / 1024**2
     frame_size = data_size / np.prod(data.shape[:-2])
 
     clog.debug(f"File ID '{file_id}' opened successfully")
-    clog.debug(
-        f"File dimensions: {shape}, "
-        f"chunking: {str(data.chunksize)}")
+    clog.debug(f"File dimensions: {shape}, chunking: {str(data.chunksize)}")
 
     memmap = fits.getdata(file_path, hdu_index, memmap=True)
 
@@ -314,7 +351,8 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         wcs = WCS(header)
 
     header["PIX_AREA"] = np.abs(
-        np.linalg.det(wcs.celestial.pixel_scale_matrix))
+        np.linalg.det(wcs.celestial.pixel_scale_matrix)
+    )
 
     filedata = FileData(
         data=data,
@@ -337,7 +375,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
 
     # Get header
     header = await get_header_from_xradio(data, client)
-    img_shape = [data.sizes['m'], data.sizes['l']]
+    img_shape = [data.sizes["m"], data.sizes["l"]]
 
     # Log file information in separate parts to avoid
     # formatting conflicts
@@ -347,7 +385,8 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         f"frequency={data.sizes.get('frequency', 'N/A')}, "
         f"polarization={data.sizes.get('polarization', 'N/A')}, "
         f"l={data.sizes.get('l', 'N/A')}, "
-        f"m={data.sizes.get('m', 'N/A')}")
+        f"m={data.sizes.get('m', 'N/A')}"
+    )
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
 
     # Get unchunked data
