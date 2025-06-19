@@ -1084,17 +1084,27 @@ class Session:
     ) -> None:
         t0 = perf_counter_ns()
 
-        # Get data
-        data = await self.fm.get_slice(file_id, channel=None, stokes=0)
-        hdr = self.fm.files[file_id].header
-
         # Get spectral profile
         sp = CARTA.SpectralProfile()
         sp.coordinate = "z"
         sp.stats_type = stats_type
 
+        # Set is_point to True
+        # if region_id is 0 (cursor) or region is point
         if region_id == 0:
-            # Cursor spectral profile
+            is_point = True
+        elif (
+            region_info is not None
+            and region_info.region_type == CARTA.RegionType.POINT
+        ):
+            points = region_info.control_points
+            x, y = round(points[0].x), round(points[0].y)
+            is_point = True
+        else:
+            is_point = False
+
+        if is_point:
+            # Cursor/point spectral profile
             spec_profile = self.fm.get_point_spectrum(
                 file_id=file_id, x=x, y=y, channel=None, stokes=0, time=0
             )
@@ -1108,10 +1118,16 @@ class Session:
             if spec_profile is None:
                 return None
 
-            sp.raw_values_fp32 = spec_profile.astype("float32").tobytes()
-            msg_add = " cursor"
+            if region_id == 0:
+                sp.raw_values_fp32 = spec_profile.astype("float32").tobytes()
+                msg_add = " cursor"
+            else:
+                sp.raw_values_fp64 = spec_profile.astype("float64").tobytes()
+                msg_add = ""
         else:
             # Region spectral profile
+            data = await self.fm.get_slice(file_id, channel=None, stokes=0)
+            hdr = self.fm.files[file_id].header
             region = get_region(region_info)
             spec_profile = get_spectral_profile_dask(
                 data, region, stats_type, hdr
