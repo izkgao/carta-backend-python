@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 
 import dask.array as da
 import numpy as np
@@ -8,6 +9,14 @@ from rasterio.transform import from_origin
 from shapely.affinity import rotate
 
 from carta_backend import proto as CARTA
+
+
+@dataclass
+class RegionData:
+    file_id: int
+    region_info: CARTA.RegionInfo
+    preview_region: bool | None
+    profiles: np.ndarray | None
 
 
 def get_rectangle(region_info):
@@ -81,9 +90,9 @@ def rasterize_chunk(block_data, block_info=None, region=None):
 
     block_mask = np.zeros(block_data.shape[-2:], dtype=np.uint8)
 
-    xmin = block_info[0]['array-location'][-1][0]
+    xmin = block_info[0]["array-location"][-1][0]
     xmax = xmin + block_data.shape[-1]
-    ymin = block_info[0]['array-location'][-2][0]
+    ymin = block_info[0]["array-location"][-2][0]
     ymax = ymin + block_data.shape[-2]
     block_box = shapely.box(xmin, ymin, xmax, ymax)
 
@@ -131,25 +140,58 @@ STATS_FUNCS = {
 
 def get_spectral_profile(data, mask, stats_type, hdr=None):
     mdata = data[:, mask]
-    return STATS_FUNCS[stats_type](mdata, axis=1, hdr=hdr).astype('<f8')
+    return STATS_FUNCS[stats_type](mdata, axis=1, hdr=hdr).astype("<f8")
 
 
 def get_spectral_profile_dask(data, region, stats_type, hdr=None):
     if isinstance(region, shapely.Point):
-        return data[:, region.y, region.x].astype('<f8')
+        return data[:, region.y, region.x].astype("<f8")
     if is_box(region):
         minx, miny, maxx, maxy = [int(i) for i in region.bounds]
-        mdata = data[:, miny:maxy+1, minx:maxx+1].astype('<f8')
+        mdata = data[:, miny : maxy + 1, minx : maxx + 1].astype("<f8")
     else:
         mask = data[0].map_blocks(
-            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8))
+            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8)
+        )
         mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
         mdata = da.where(mask_3d, data, da.nan)
     kwargs = {"axis": (1, 2)}
     if stats_type == 3:
         kwargs["hdr"] = hdr
     spec_profile = STATS_FUNCS[stats_type](mdata, **kwargs)
-    return spec_profile.astype('<f8')
+    return spec_profile.astype("<f8")
+
+
+def get_spectral_profile_dask_all(data, region, hdr):
+    if is_box(region):
+        minx, miny, maxx, maxy = [int(i) for i in region.bounds]
+        mdata = data[:, miny : maxy + 1, minx : maxx + 1].astype("float64")
+    else:
+        mask = data[0].map_blocks(
+            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8)
+        )
+        mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
+        mdata = da.where(mask_3d, data, da.nan)
+
+    size = mdata.shape[1] * mdata.shape[2]
+    beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
+    psum = da.nansum(mdata, axis=(1, 2))
+    pfld = psum / beam_area
+    pnum = size - da.sum(da.isnan(mdata), axis=(1, 2))
+    pmean = psum / pnum
+    mdatasq = mdata**2
+    psumsq = da.nansum(mdatasq, axis=(1, 2))
+    prms = da.sqrt(psumsq / pnum)
+    pstd = da.sqrt(
+        da.nansum((mdata - pmean[:, None, None]) ** 2, axis=(1, 2)) / pnum
+    )
+    pmin = da.nanmin(mdata, axis=(1, 2))
+    pmax = da.nanmax(mdata, axis=(1, 2))
+    pext = da.where(da.abs(pmax) >= da.abs(pmin), pmax, pmin)
+    profiles = da.stack(
+        [psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext], axis=0
+    )
+    return profiles.astype("float64")
 
 
 def parse_region(file_path, file_type):
@@ -167,19 +209,23 @@ def parse_crtf_centerbox_string(s):
 
     # Match the centerbox and extract numbers
     shape_match = re.search(
-        r'centerbox\s*\[\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\],\s*'
-        r'\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\]\]',
-        s
+        r"centerbox\s*\[\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\],\s*"
+        r"\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\]\]",
+        s,
     )
 
     if shape_match:
-        result["center"] = [float(shape_match.group(1)),
-                            float(shape_match.group(2))]
-        result["width"] = [float(shape_match.group(3)),
-                           float(shape_match.group(4))]
+        result["center"] = [
+            float(shape_match.group(1)),
+            float(shape_match.group(2)),
+        ]
+        result["width"] = [
+            float(shape_match.group(3)),
+            float(shape_match.group(4)),
+        ]
 
     # Match all key=value pairs
-    kv_pairs = re.findall(r'(\w+)=([\w\-.]+)', s)
+    kv_pairs = re.findall(r"(\w+)=([\w\-.]+)", s)
     for key, value in kv_pairs:
         # Try to convert value to float or int if possible
         try:

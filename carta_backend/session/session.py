@@ -29,8 +29,12 @@ from carta_backend.file.utils import (
     is_zarr,
 )
 from carta_backend.log import logger
-from carta_backend.region import get_region, get_spectral_profile_dask
-from carta_backend.region.utils import parse_region
+from carta_backend.region import get_region
+from carta_backend.region.utils import (
+    RegionData,
+    get_spectral_profile_dask_all,
+    parse_region,
+)
 from carta_backend.tile import (
     decode_tile_coord,
     get_nan_encodings_block,
@@ -1126,27 +1130,17 @@ class Session:
                 msg_add = ""
         else:
             # Region spectral profile
-            data = await self.fm.get_slice(file_id, channel=None, stokes=0)
-            hdr = self.fm.files[file_id].header
-            region = get_region(region_info)
-            spec_profile = get_spectral_profile_dask(
-                data, region, stats_type, hdr
-            )
+            if self.region_dict[region_id].profiles is None:
+                data = await self.fm.get_slice(file_id, channel=None, stokes=0)
+                hdr = self.fm.files[file_id].header
+                region = get_region(region_info)
+                profiles = get_spectral_profile_dask_all(data, region, hdr)
+                profiles = await self.client.compute(profiles)
+                self.region_dict[region_id].profiles = profiles
 
-            # Compute the task and get future
-            future = self.client.compute(spec_profile)
-
-            try:
-                # Await result
-                spec_profile = await future
-                sp.raw_values_fp64 = spec_profile.tobytes()
-                msg_add = ""
-            except Exception as e:
-                # Handle any exceptions
-                msg = "Dask computation for region spectral profile failed: "
-                msg += str(e)
-                pflog.error(msg)
-                return None
+            profile = self.region_dict[region_id].profiles[stats_type - 2]
+            sp.raw_values_fp64 = profile.tobytes()
+            msg_add = ""
 
         # Create response object
         resp = CARTA.SpectralProfileData()
@@ -1228,13 +1222,14 @@ class Session:
         # Record region
         async with self.lock:
             if region_id not in self.region_dict:
-                self.region_dict[region_id] = {
-                    "file_id": file_id,
-                    "region_info": region_info,
-                    "preview_region": preview_region,
-                }
+                self.region_dict[region_id] = RegionData(
+                    file_id=file_id,
+                    region_info=region_info,
+                    preview_region=preview_region,
+                    profiles=None,
+                )
             else:
-                self.region_dict[region_id]["region_info"] = region_info
+                self.region_dict[region_id].region_info = region_info
 
         # Send message
         resp = CARTA.SetRegionAck()
@@ -1295,7 +1290,7 @@ class Session:
                 x, y = self.cursor_dict[file_id]
             else:
                 # Region
-                region_info = self.region_dict[region_id]["region_info"]
+                region_info = self.region_dict[region_id].region_info
                 # stats_type = self.prev_stats_type
                 x, y = None, None
 
@@ -1469,11 +1464,12 @@ class Session:
             max_id = max(keys) if keys else 0
             for region_info, region_style in regions:
                 max_id += 1
-                self.region_dict[max_id] = {
-                    "file_id": group_id,
-                    "region_info": region_info,
-                    "preview_region": None,
-                }
+                self.region_dict[max_id] = RegionData(
+                    file_id=group_id,
+                    region_info=region_info,
+                    preview_region=None,
+                    profiles=None,
+                )
                 resp.regions[max_id].CopyFrom(region_info)
                 resp.region_styles[max_id].CopyFrom(region_style)
 
