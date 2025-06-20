@@ -50,20 +50,22 @@ class ProgramSettings:
         if self.file_or_folder is not None:
             self.file_or_folder = os.path.abspath(self.file_or_folder)
 
-        if os.path.isdir(self.file_or_folder):
-            # Zarr
-            if os.path.exists(os.path.join(self.file_or_folder, ".zattrs")):
-                self.file = self.file_or_folder
-            # CASA
-            elif os.path.exists(
-                os.path.join(self.file_or_folder, "table.lock")
-            ):
-                self.file = self.file_or_folder
-            # Directory
+            if os.path.isdir(self.file_or_folder):
+                # Zarr
+                if os.path.exists(
+                    os.path.join(self.file_or_folder, ".zattrs")
+                ):
+                    self.file = self.file_or_folder
+                # CASA
+                elif os.path.exists(
+                    os.path.join(self.file_or_folder, "table.lock")
+                ):
+                    self.file = self.file_or_folder
+                # Directory
+                else:
+                    self.starting_folder = self.file_or_folder
             else:
-                self.starting_folder = self.file_or_folder
-        else:
-            self.file = self.file_or_folder
+                self.file = self.file_or_folder
 
         if self.file is not None:
             file = Path(self.file).relative_to(self.top_level_folder)
