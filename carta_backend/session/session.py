@@ -436,7 +436,7 @@ class Session:
         directory = self.top_level_folder / obj.directory
         file_name = file
         file_path = str(directory / file_name)
-        hdu_index = int(hdu) if len(hdu) > 0 else None
+        hdu_index = int(hdu) if len(hdu) > 0 else 0
         file_info = get_file_info(file_path)
 
         self.file_path = file_path

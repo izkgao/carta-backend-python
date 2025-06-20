@@ -19,19 +19,15 @@ def main():
     )
 
     parser.add_argument(
-        "file_or_folder",
-        nargs="?",
-        help="File or folder to open"
+        "file_or_folder", nargs="?", help="File or folder to open"
     )
     parser.add_argument(
         "--dask-scheduler",
         type=str,
-        help="Dask scheduler address (e.g., 127.0.0.1:8786)"
+        help="Dask scheduler address (e.g., 127.0.0.1:8786)",
     )
     parser.add_argument(
-        "-v", "--version",
-        action="store_true",
-        help="Print version"
+        "-v", "--version", action="store_true", help="Print version"
     )
     parser.add_argument(
         "--verbosity",
@@ -40,14 +36,12 @@ def main():
         help="Display verbose logging from this level (default: 4)",
     )
     parser.add_argument(
-        "--no_log",
-        action="store_true",
-        help="Do not log output to a log file"
+        "--no_log", action="store_true", help="Do not log output to a log file"
     )
     parser.add_argument(
         "--log_performance",
         action="store_true",
-        help="Enable performance debug logs"
+        help="Enable performance debug logs",
     )
     parser.add_argument(
         "--log_protocol_messages",
@@ -75,7 +69,7 @@ def main():
         # Not implemented yet
         "--http_url_prefix",
         type=str,
-        help="Custom URL prefix for HTTP server"
+        help="Custom URL prefix for HTTP server",
     )
     parser.add_argument(
         "--no_browser",
@@ -86,7 +80,7 @@ def main():
         # Not implemented yet
         "--browser",
         type=str,
-        help="Custom browser command"
+        help="Custom browser command",
     )
     parser.add_argument(
         "--host",
@@ -94,7 +88,8 @@ def main():
         help="Only listen on the specified interface (IP address or hostname)",
     )
     parser.add_argument(
-        "-p", "--port",
+        "-p",
+        "--port",
         type=int,
         default=3002,
         help="Manually set the HTTP and WebSocket port (default: 3002)",
@@ -103,7 +98,7 @@ def main():
         "--top_level_folder",
         type=str,
         default="/",
-        help="Set top-level folder for data files"
+        help="Set top-level folder for data files",
     )
     parser.add_argument(
         "--frontend_folder",
@@ -126,13 +121,13 @@ def main():
         # Not implemented yet
         "--idle_timeout",
         type=int,
-        help="Number of seconds to keep idle sessions alive"
+        help="Number of seconds to keep idle sessions alive",
     )
     parser.add_argument(
         # Not implemented yet
         "--read_only_mode",
         action="store_true",
-        help="Disable write requests"
+        help="Disable write requests",
     )
     parser.add_argument(
         # Not implemented yet
@@ -144,7 +139,7 @@ def main():
         # Not implemented yet
         "--no_user_config",
         action="store_true",
-        help="Ignore user configuration file"
+        help="Ignore user configuration file",
     )
     parser.add_argument(
         # Not implemented yet
@@ -182,7 +177,7 @@ def main():
 
     # Show version
     if args.version:
-        print(get_version('carta-backend'))
+        print(get_version("carta-backend"))
         return None
 
     # Set program settings
@@ -191,6 +186,7 @@ def main():
         socket_port=args.port,
         frontend_folder=args.frontend_folder,
         top_level_folder=args.top_level_folder,
+        file_or_folder=args.file_or_folder,
     )
 
     # Configure logger
@@ -200,9 +196,9 @@ def main():
         verbosity=args.verbosity,
         no_log=args.no_log,
         log_performance=args.log_performance,
-        log_protocol_messages=args.log_protocol_messages
+        log_protocol_messages=args.log_protocol_messages,
     )
-    clog = logger.bind(name='CARTA')
+    clog = logger.bind(name="CARTA")
 
     # Check if the port is available
     if not is_port_available(ps.socket_port):
@@ -226,13 +222,19 @@ def main():
         token = str(uuid4())
         url = f"{base_url}/?token={token}"
 
+    # Open file
+    if ps.file is not None:
+        url += f"&file={ps.file}"
+
     # Show information
     clog.info(f"Writing to the log file: {ps.log_file}")
     clog.info(f"{ps.backend_path}: Version {ps.version}")
     clog.info(f"Serving CARTA frontend from {ps.frontend_folder}")
-    clog.info(f"Listening on port {ps.socket_port} "
-              f"with top level folder {ps.top_level_folder}, "
-              f"starting folder {ps.starting_folder}.")
+    clog.info(
+        f"Listening on port {ps.socket_port} "
+        f"with top level folder {ps.top_level_folder}, "
+        f"starting folder {ps.starting_folder}."
+    )
     clog.info(f"CARTA is accessible at {url}")
 
     if not args.no_database:
@@ -241,8 +243,10 @@ def main():
 
     if args.enable_scripting:
         scripting_url = f"{base_url}/api/scripting/action"
-        clog.debug(f"To use the CARTA scripting interface, "
-                   f"send POST requests to {scripting_url}")
+        clog.debug(
+            f"To use the CARTA scripting interface, "
+            f"send POST requests to {scripting_url}"
+        )
 
     # Set Dask chunk size
     dask.config.set({"array.chunk-size": args.dask_chunk_size})
@@ -255,13 +259,16 @@ def main():
         token=token,
         top_level_folder=ps.top_level_folder,
         starting_folder=ps.starting_folder,
-        dask_scheduler=args.dask_scheduler
+        dask_scheduler=args.dask_scheduler,
+        file=ps.file,
     )
 
     try:
-        asyncio.run(server.start(
-            open_browser=not args.no_browser,
-        ))
+        asyncio.run(
+            server.start(
+                open_browser=not args.no_browser,
+            )
+        )
     except KeyboardInterrupt:
         clog.info("Exiting backend.")
     finally:

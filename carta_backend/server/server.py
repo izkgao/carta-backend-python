@@ -40,9 +40,17 @@ class Server:
         Authentication token for securing WebSocket connections
     """
 
-    def __init__(self, frontend_folder='.', host="0.0.0.0", port=3002,
-                 token=None, top_level_folder=None, starting_folder=None,
-                 dask_scheduler=None):
+    def __init__(
+        self,
+        frontend_folder=".",
+        host="0.0.0.0",
+        port=3002,
+        token=None,
+        top_level_folder=None,
+        starting_folder=None,
+        dask_scheduler=None,
+        file=None,
+    ):
         """Initialize the Server instance.
 
         Parameters
@@ -62,6 +70,8 @@ class Server:
             Starting folder for file operations, by default None
         dask_scheduler : str, optional
             Dask scheduler address, by default None
+        file : str, optional
+            File to open, by default None
         """
         self.frontend_folder = frontend_folder
         self.host = host
@@ -70,7 +80,7 @@ class Server:
         self.top_level_folder = top_level_folder
         self.starting_folder = starting_folder
         self.dask_scheduler = dask_scheduler
-
+        self.file = file
         self.client = None
         self.session = None
 
@@ -114,7 +124,8 @@ class Server:
 
             if client_token != self.token:
                 await websocket.close(
-                    code=1008, reason="Authentication failed")
+                    code=1008, reason="Authentication failed"
+                )
                 return
 
         await websocket.accept()
@@ -197,8 +208,9 @@ class Server:
         routes = []
 
         # HTTP Route
-        routes.append(Route("/", endpoint=self.http_endpoint,
-                            methods=["GET", "POST"]))
+        routes.append(
+            Route("/", endpoint=self.http_endpoint, methods=["GET", "POST"])
+        )
         # WebSocket Route
         routes.append(WebSocketRoute("/", endpoint=self.websocket_endpoint))
 
@@ -218,6 +230,8 @@ class Server:
         url = f"http://{self.host}:{self.port}/"
         if self.token:
             url += f"?token={self.token}"
+        if self.file:
+            url += f"&file={self.file}"
         return url
 
     def create_server(self, enable_uvicorn_logs=False):
@@ -254,8 +268,10 @@ class Server:
                 writer.close()
                 await writer.wait_closed()
                 clog.debug("WebBrowser: using default browser.")
-                msg = ("WebBrowser: Trying to launch CARTA with the "
-                       f"default browser using: open {url}")
+                msg = (
+                    "WebBrowser: Trying to launch CARTA with the "
+                    f"default browser using: open {url}"
+                )
                 clog.debug(msg)
                 break
             except (OSError, ConnectionRefusedError):
@@ -276,19 +292,18 @@ class Server:
             top_level_folder=self.top_level_folder,
             starting_folder=self.starting_folder,
             session_id=session_id,
-            client=self.client)
+            client=self.client,
+        )
 
     async def start_dask_client(self):
         if self.dask_scheduler is None:
             self.client = await Client(
                 asynchronous=True,
                 threads_per_worker=4,
-                n_workers=os.cpu_count() // 4
+                n_workers=os.cpu_count() // 4,
             )
         else:
-            self.client = await Client(
-                address=self.dask_scheduler
-            )
+            self.client = await Client(address=self.dask_scheduler)
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
         clog.info(f"Dask dashboard link: {self.client.dashboard_link}")
