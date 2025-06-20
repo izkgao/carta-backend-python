@@ -143,26 +143,26 @@ def get_spectral_profile(data, mask, stats_type, hdr=None):
     return STATS_FUNCS[stats_type](mdata, axis=1, hdr=hdr).astype("<f8")
 
 
-def get_spectral_profile_dask(data, region, stats_type, hdr=None):
-    if isinstance(region, shapely.Point):
-        return data[:, region.y, region.x].astype("<f8")
-    if is_box(region):
-        minx, miny, maxx, maxy = [int(i) for i in region.bounds]
-        mdata = data[:, miny : maxy + 1, minx : maxx + 1].astype("<f8")
-    else:
-        mask = data[0].map_blocks(
-            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8)
-        )
-        mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
-        mdata = da.where(mask_3d, data, da.nan)
-    kwargs = {"axis": (1, 2)}
-    if stats_type == 3:
-        kwargs["hdr"] = hdr
-    spec_profile = STATS_FUNCS[stats_type](mdata, **kwargs)
-    return spec_profile.astype("<f8")
+# def get_spectral_profile_dask(data, region, stats_type, hdr=None):
+#     if isinstance(region, shapely.Point):
+#         return data[:, region.y, region.x].astype("<f8")
+#     if is_box(region):
+#         minx, miny, maxx, maxy = [int(i) for i in region.bounds]
+#         mdata = data[:, miny : maxy + 1, minx : maxx + 1].astype("<f8")
+#     else:
+#         mask = data[0].map_blocks(
+#             rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8)
+#         )
+#         mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
+#         mdata = da.where(mask_3d, data, da.nan)
+#     kwargs = {"axis": (1, 2)}
+#     if stats_type == 3:
+#         kwargs["hdr"] = hdr
+#     spec_profile = STATS_FUNCS[stats_type](mdata, **kwargs)
+#     return spec_profile.astype("<f8")
 
 
-def get_spectral_profile_dask_all(data, region, hdr):
+def _get_spectral_profile_dask(data, region, hdr):
     if is_box(region):
         minx, miny, maxx, maxy = [int(i) for i in region.bounds]
         mdata = data[:, miny : maxy + 1, minx : maxx + 1].astype("float64")
@@ -174,24 +174,30 @@ def get_spectral_profile_dask_all(data, region, hdr):
         mdata = da.where(mask_3d, data, da.nan)
 
     size = mdata.shape[1] * mdata.shape[2]
-    beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
     psum = da.nansum(mdata, axis=(1, 2))
-    pfld = psum / beam_area
     pnum = size - da.sum(da.isnan(mdata), axis=(1, 2))
     pmean = psum / pnum
-    mdatasq = mdata**2
-    psumsq = da.nansum(mdatasq, axis=(1, 2))
-    prms = da.sqrt(psumsq / pnum)
+    psumsq = da.nansum(mdata**2, axis=(1, 2))
     pstd = da.sqrt(
         da.nansum((mdata - pmean[:, None, None]) ** 2, axis=(1, 2)) / pnum
     )
     pmin = da.nanmin(mdata, axis=(1, 2))
     pmax = da.nanmax(mdata, axis=(1, 2))
-    pext = da.where(da.abs(pmax) >= da.abs(pmin), pmax, pmin)
-    profiles = da.stack(
+    res = da.stack([psum, pnum, pmean, psumsq, pstd, pmin, pmax], axis=0)
+    return res
+
+
+async def get_spectral_profile_dask(data, region, hdr, client):
+    res = await client.compute(_get_spectral_profile_dask(data, region, hdr))
+    psum, pnum, pmean, psumsq, pstd, pmin, pmax = res
+    beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
+    pfld = psum / beam_area
+    prms = np.sqrt(psumsq / pnum)
+    pext = np.where(np.abs(pmax) >= np.abs(pmin), pmax, pmin)
+    profiles = np.stack(
         [psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext], axis=0
-    )
-    return profiles.astype("float64")
+    ).astype("float64")
+    return profiles
 
 
 def parse_region(file_path, file_type):

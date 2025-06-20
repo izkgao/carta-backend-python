@@ -32,7 +32,7 @@ from carta_backend.log import logger
 from carta_backend.region import get_region
 from carta_backend.region.utils import (
     RegionData,
-    get_spectral_profile_dask_all,
+    get_spectral_profile_dask,
     parse_region,
 )
 from carta_backend.tile import (
@@ -1134,8 +1134,9 @@ class Session:
                 data = await self.fm.get_slice(file_id, channel=None, stokes=0)
                 hdr = self.fm.files[file_id].header
                 region = get_region(region_info)
-                profiles = get_spectral_profile_dask_all(data, region, hdr)
-                profiles = await self.client.compute(profiles)
+                profiles = await get_spectral_profile_dask(
+                    data, region, hdr, self.client
+                )
                 self.region_dict[region_id].profiles = profiles
 
             profile = self.region_dict[region_id].profiles[stats_type - 2]
