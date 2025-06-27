@@ -2,8 +2,10 @@ import re
 from dataclasses import dataclass
 
 import dask.array as da
+import numba as nb
 import numpy as np
 import shapely
+from numba import njit, prange
 from rasterio.features import rasterize
 from rasterio.transform import from_origin
 from shapely.affinity import rotate
@@ -125,6 +127,77 @@ def get_extrema(x, axis=None):
     return da.take(x.ravel(), max_indices + add_indices)
 
 
+@njit(fastmath=True)
+def isnan(x):
+    if int(x) == -9223372036854775808:
+        return True
+    else:
+        return False
+
+
+@njit((nb.float64[:](nb.float32[:, :])), fastmath=True)
+def _numba_stats(data):
+    res = np.array([0, 0, 0, np.inf, -np.inf])
+
+    for i in data.ravel():
+        if not isnan(i):
+            # sum
+            res[0] += i
+            # num
+            res[1] += 1
+            # sumsq
+            res[2] += i**2
+            # min
+            if i < res[3]:
+                res[3] = i
+            # max
+            if i > res[4]:
+                res[4] = i
+    if res[1] == 0:
+        res[0] = np.nan
+        res[2] = np.nan
+    return res
+
+
+@njit(
+    (nb.float64[:, :](nb.float32[:, :, :], nb.float64)),
+    parallel=True,
+    fastmath=True,
+)
+def numba_stats(data, beam_area):
+    # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
+    res = np.zeros((9, data.shape[0]))
+    for i in prange(data.shape[0]):
+        psum, pnum, psumsq, pmin, pmax = _numba_stats(data[i])
+
+        if pnum == 0:
+            pmean = np.nan
+            prms = np.nan
+            pstd = np.nan
+        else:
+            pmean = psum / pnum
+            prms = np.sqrt(psumsq / pnum)
+            pstd = np.sqrt((psumsq - pnum * pmean**2) / pnum)
+
+        if np.abs(pmax) >= np.abs(pmin):
+            pext = pmax
+        else:
+            pext = pmin
+
+        pfld = psum / beam_area
+
+        res[0, i] = psum
+        res[1, i] = pfld
+        res[2, i] = pmean
+        res[3, i] = prms
+        res[4, i] = pstd
+        res[5, i] = psumsq
+        res[6, i] = pmin
+        res[7, i] = pmax
+        res[8, i] = pext
+    return res
+
+
 STATS_FUNCS = {
     2: da.nansum,
     3: get_fluxdensity,
@@ -187,7 +260,7 @@ def _get_spectral_profile_dask(data, region, hdr):
     return res
 
 
-async def get_spectral_profile_dask(data, region, hdr, client):
+async def get_spectral_profile_dask_old(data, region, hdr, client):
     res = await client.compute(_get_spectral_profile_dask(data, region, hdr))
     psum, pnum, pmean, psumsq, pstd, pmin, pmax = res
     beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
@@ -197,6 +270,32 @@ async def get_spectral_profile_dask(data, region, hdr, client):
     profiles = np.stack(
         [psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext], axis=0
     ).astype("float64")
+    return profiles
+
+
+def get_spectral_profile_dask(data, region, hdr):
+    if is_box(region):
+        minx, miny, maxx, maxy = [int(i) for i in region.bounds]
+        mdata = data[:, miny : maxy + 1, minx : maxx + 1]
+    else:
+        mask = data[0].map_blocks(
+            rasterize_chunk, region=region, meta=np.array((), dtype=np.uint8)
+        )
+        mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
+        mdata = da.where(mask_3d, data, da.nan)
+
+    beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
+
+    profiles = da.map_blocks(
+        numba_stats,
+        mdata.astype("float32"),
+        beam_area,
+        dtype=np.float64,
+        chunks=(9, data.chunks[0]),
+        drop_axis=[1, 2],
+        new_axis=0,
+        meta=np.array([], dtype=np.float64),
+    )
     return profiles
 
 
