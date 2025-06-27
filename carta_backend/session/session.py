@@ -494,9 +494,9 @@ class Session:
         mpix_s = data.size / 1e6 / dt * 1000
 
         if isinstance(data, np.ndarray):
-            msg = f"Load {shape[0]}x{shape[1]} image to cache "
+            msg = f"Load {shape[1]}x{shape[0]} image to cache "
         else:
-            msg = f"Lazy load {shape[0]}x{shape[1]} image "
+            msg = f"Lazy load {shape[1]}x{shape[0]} image "
         msg += f"in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
         clog.debug(msg)
 
