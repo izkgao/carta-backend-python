@@ -252,10 +252,52 @@ def parse_crtf_centerbox_string(s):
 
     region_style = CARTA.RegionStyle()
     if "color" in result:
-        color = result["color"].upper()
-        if not color.startswith("#"):
-            color = "#" + color
-        region_style.color = color
+        color = result["color"].lstrip("#").upper()
+        region_style.color = f"#{color}"
+    if "linewidth" in result:
+        region_style.line_width = result["linewidth"]
+
+    region_style.dash_list.append(0)
+
+    return region_info, region_style
+
+
+def parse_crtf_point_string(s):
+    result = {}
+
+    # Match the symbol and extract numbers
+    shape_match = re.search(
+        r"symbol\s*\[\[\s*([\d.]+)pix,\s*([\d.]+)pix\s*\]", s
+    )
+
+    if shape_match:
+        result["point"] = [
+            float(shape_match.group(1)),
+            float(shape_match.group(2)),
+        ]
+
+    # Match all key=value pairs
+    kv_pairs = re.findall(r"(\w+)=([\w\-.]+)", s)
+    for key, value in kv_pairs:
+        # Try to convert value to float or int if possible
+        try:
+            num_val = float(value)
+            if num_val.is_integer():
+                num_val = int(num_val)
+            result[key] = num_val
+        except ValueError:
+            result[key] = value
+
+    point = CARTA.Point(x=result["point"][0], y=result["point"][1])
+
+    region_info = CARTA.RegionInfo()
+    region_info.region_type = CARTA.RegionType.POINT
+    region_info.control_points.append(point)
+
+    region_style = CARTA.RegionStyle()
+    if "color" in result:
+        color = result["color"].lstrip("#").upper()
+        region_style.color = f"#{color}"
     if "linewidth" in result:
         region_style.line_width = result["linewidth"]
 
@@ -270,8 +312,10 @@ def parse_crtf(file_path):
 
     region_list = []
 
-    # Only centerbox is supported now
     for line in lines:
         if line.startswith("centerbox"):
             region_list.append(parse_crtf_centerbox_string(line))
+        elif line.startswith("symbol"):
+            region_list.append(parse_crtf_point_string(line))
+
     return region_list
