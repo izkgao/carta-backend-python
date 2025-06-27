@@ -171,7 +171,7 @@ class FileManager:
         return data
 
     def get_point_spectrum(self, file_id, x, y, channel, stokes, time=0):
-        data = self.files[file_id].memmap
+        data = self.files[file_id].data
         wcs = self.files[file_id].wcs
         data = load_data(
             data=data,
@@ -214,95 +214,95 @@ class FileManager:
         self.cache.clear()
 
 
-# @dask.delayed
-# def mmap_load_chunk(filename, shape, dtype, offset, sl):
-#     """
-#     Memory map the given file with overall shape and dtype and return a slice
-#     specified by :code:`sl`.
+@dask.delayed
+def mmap_load_chunk(filename, shape, dtype, offset, sl):
+    """
+    Memory map the given file with overall shape and dtype and return a slice
+    specified by :code:`sl`.
 
-#     Parameters
-#     ----------
-#     filename : str
-#     shape : tuple
-#         Total shape of the data in the file
-#     dtype:
-#         NumPy dtype of the data in the file
-#     offset : int
-#         Skip :code:`offset` bytes from the beginning of the file.
-#     sl:
-#         Object that can be used for indexing or slicing a NumPy array to
-#         extract a chunk
+    Parameters
+    ----------
+    filename : str
+    shape : tuple
+        Total shape of the data in the file
+    dtype:
+        NumPy dtype of the data in the file
+    offset : int
+        Skip :code:`offset` bytes from the beginning of the file.
+    sl:
+        Object that can be used for indexing or slicing a NumPy array to
+        extract a chunk
 
-#     Returns
-#     -------
-#     numpy.memmap or numpy.ndarray
-#         View into memory map created by indexing with :code:`sl`,
-#         or NumPy ndarray in case no view can be created using :code:`sl`.
-#     """
-#     data = np.memmap(
-#         filename, mode="r", shape=shape, dtype=dtype, offset=offset
-#     )
-#     return data[sl]
-
-
-# def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
-#     # Create a sample array to get the default chunking
-#     sample_array = da.empty(shape, dtype=dtype, chunks=chunks)
-#     chunks = sample_array.chunks
-
-#     # Special case for 0-dimensional arrays
-#     if len(shape) == 0:
-#         delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, ())
-#         return da.from_delayed(delayed_chunk, shape=(), dtype=dtype)
-
-#     # Calculate the chunk indices for each dimension
-#     chunk_indices = []
-#     for dim_chunks in chunks:
-#         indices = []
-#         start = 0
-#         for size in dim_chunks:
-#             indices.append((start, start + size))
-#             start += size
-#         chunk_indices.append(indices)
-
-#     # Function to build a block at specific chunk indices
-#     def build_block(idx_tuple):
-#         # Create slices from the chunk indices
-#         slices = tuple(slice(start, stop) for start, stop in idx_tuple)
-
-#         # Calculate the shape of this chunk
-#         chunk_shape = tuple(stop - start for start, stop in idx_tuple)
-
-#         # Create a delayed chunk
-#         delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, slices)
-
-#         # Create a dask array from the delayed chunk
-#         return da.from_delayed(delayed_chunk, shape=chunk_shape, dtype=dtype)
-
-#     # Create a nested list structure that matches the dimensionality of chunks
-#     # This is a recursive function to handle any number of dimensions
-#     def create_nested_blocks(dimension=0, indices=()):
-#         if dimension == len(chunks):
-#             # We've reached the right depth, build the block
-#             return build_block(indices)
-#         else:
-#             # Create a list of blocks for this dimension
-#             blocks_in_dim = []
-#             for idx in chunk_indices[dimension]:
-#                 new_indices = indices + (idx,)
-#                 blocks_in_dim.append(
-#                     create_nested_blocks(dimension + 1, new_indices)
-#                 )
-#             return blocks_in_dim
-
-#     # Create the nested structure of blocks
-#     nested_blocks = create_nested_blocks()
-
-#     # Combine all blocks using da.block
-#     return da.block(nested_blocks)
+    Returns
+    -------
+    numpy.memmap or numpy.ndarray
+        View into memory map created by indexing with :code:`sl`,
+        or NumPy ndarray in case no view can be created using :code:`sl`.
+    """
+    data = np.memmap(
+        filename, mode="r", shape=shape, dtype=dtype, offset=offset
+    )
+    return data[sl]
 
 
 def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+    # Create a sample array to get the default chunking
+    sample_array = da.empty(shape, dtype=dtype, chunks=chunks)
+    chunks = sample_array.chunks
+
+    # Special case for 0-dimensional arrays
+    if len(shape) == 0:
+        delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, ())
+        return da.from_delayed(delayed_chunk, shape=(), dtype=dtype)
+
+    # Calculate the chunk indices for each dimension
+    chunk_indices = []
+    for dim_chunks in chunks:
+        indices = []
+        start = 0
+        for size in dim_chunks:
+            indices.append((start, start + size))
+            start += size
+        chunk_indices.append(indices)
+
+    # Function to build a block at specific chunk indices
+    def build_block(idx_tuple):
+        # Create slices from the chunk indices
+        slices = tuple(slice(start, stop) for start, stop in idx_tuple)
+
+        # Calculate the shape of this chunk
+        chunk_shape = tuple(stop - start for start, stop in idx_tuple)
+
+        # Create a delayed chunk
+        delayed_chunk = mmap_load_chunk(filename, shape, dtype, offset, slices)
+
+        # Create a dask array from the delayed chunk
+        return da.from_delayed(delayed_chunk, shape=chunk_shape, dtype=dtype)
+
+    # Create a nested list structure that matches the dimensionality of chunks
+    # This is a recursive function to handle any number of dimensions
+    def create_nested_blocks(dimension=0, indices=()):
+        if dimension == len(chunks):
+            # We've reached the right depth, build the block
+            return build_block(indices)
+        else:
+            # Create a list of blocks for this dimension
+            blocks_in_dim = []
+            for idx in chunk_indices[dimension]:
+                new_indices = indices + (idx,)
+                blocks_in_dim.append(
+                    create_nested_blocks(dimension + 1, new_indices)
+                )
+            return blocks_in_dim
+
+    # Create the nested structure of blocks
+    nested_blocks = create_nested_blocks()
+
+    # Combine all blocks using da.block
+    return da.block(nested_blocks)
+
+
+def mmap_dask_array_new(filename, shape, dtype, offset=0, chunks="auto"):
     def build_block(_, block_info=None):
         # Create slices from the chunk indices
         idx_tuple = block_info[0]["array-location"]
