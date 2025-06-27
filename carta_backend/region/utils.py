@@ -135,27 +135,48 @@ def isnan(x):
         return False
 
 
-@njit((nb.float64[:](nb.float32[:, :])), fastmath=True)
-def _numba_stats(data):
-    res = np.array([0, 0, 0, np.inf, -np.inf])
+@njit((nb.float64[:](nb.float32[:, :], nb.float64)), fastmath=True)
+def _numba_stats(data, beam_area):
+    # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
+    res = np.array(
+        [0, np.nan, np.nan, np.nan, np.nan, 0, np.inf, -np.inf, np.nan]
+    )
+    pnum = 0
 
     for i in data.ravel():
         if not isnan(i):
             # sum
             res[0] += i
             # num
-            res[1] += 1
+            pnum += 1
             # sumsq
-            res[2] += i**2
+            res[5] += i**2
             # min
-            if i < res[3]:
-                res[3] = i
+            if i < res[6]:
+                res[6] = i
             # max
-            if i > res[4]:
-                res[4] = i
-    if res[1] == 0:
+            if i > res[7]:
+                res[7] = i
+    if pnum == 0:
+        # sum
         res[0] = np.nan
-        res[2] = np.nan
+        # sumsq
+        res[5] = np.nan
+    else:
+        # mean = sum / num
+        res[2] = res[0] / pnum
+        # rms = sqrt(sumsq / num)
+        res[3] = np.sqrt(res[5] / pnum)
+        # std = sqrt((sumsq - num * mean**2) / num)
+        res[4] = np.sqrt((res[5] - pnum * res[2] ** 2) / pnum)
+
+    if np.abs(res[7]) >= np.abs(res[6]):
+        res[8] = res[7]
+    else:
+        res[8] = res[6]
+
+    # flux density = sum / beam_area
+    res[1] = res[0] / beam_area
     return res
 
 
@@ -168,33 +189,7 @@ def numba_stats(data, beam_area):
     # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
     res = np.zeros((9, data.shape[0]))
     for i in prange(data.shape[0]):
-        psum, pnum, psumsq, pmin, pmax = _numba_stats(data[i])
-
-        if pnum == 0:
-            pmean = np.nan
-            prms = np.nan
-            pstd = np.nan
-        else:
-            pmean = psum / pnum
-            prms = np.sqrt(psumsq / pnum)
-            pstd = np.sqrt((psumsq - pnum * pmean**2) / pnum)
-
-        if np.abs(pmax) >= np.abs(pmin):
-            pext = pmax
-        else:
-            pext = pmin
-
-        pfld = psum / beam_area
-
-        res[0, i] = psum
-        res[1, i] = pfld
-        res[2, i] = pmean
-        res[3, i] = prms
-        res[4, i] = pstd
-        res[5, i] = psumsq
-        res[6, i] = pmin
-        res[7, i] = pmax
-        res[8, i] = pext
+        res[:, i] = _numba_stats(data[i], beam_area)
     return res
 
 
@@ -284,7 +279,7 @@ def get_spectral_profile_dask(data, region, hdr):
         mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
         mdata = da.where(mask_3d, data, da.nan)
 
-    beam_area = hdr["BMAJ"] * hdr["BMIN"] / hdr["PIX_AREA"] * 1.13309
+    beam_area = np.pi * hdr["BMAJ"] * hdr["BMIN"] / (4 * np.log(2))
 
     profiles = da.map_blocks(
         numba_stats,
