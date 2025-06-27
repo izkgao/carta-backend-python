@@ -1230,6 +1230,7 @@ class Session:
                 )
             else:
                 self.region_dict[region_id].region_info = region_info
+                self.region_dict[region_id].profiles = None
 
         # Send message
         resp = CARTA.SetRegionAck()
