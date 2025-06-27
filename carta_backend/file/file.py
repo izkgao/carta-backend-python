@@ -245,7 +245,7 @@ def mmap_load_chunk(filename, shape, dtype, offset, sl):
     return data[sl]
 
 
-def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+def mmap_dask_array_old(filename, shape, dtype, offset=0, chunks="auto"):
     # Create a sample array to get the default chunking
     sample_array = da.empty(shape, dtype=dtype, chunks=chunks)
     chunks = sample_array.chunks
@@ -302,19 +302,19 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
     return da.block(nested_blocks)
 
 
-def mmap_dask_array_new(filename, shape, dtype, offset=0, chunks="auto"):
+def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
     def build_block(_, block_info=None):
         # Create slices from the chunk indices
         idx_tuple = block_info[0]["array-location"]
         slices = tuple(slice(start, stop) for start, stop in idx_tuple)
 
-        # Create a delayed chunk
-        delayed_chunk = np.memmap(
+        # Create a memmap chunk
+        memmap_chunk = np.memmap(
             filename, mode="r", shape=shape, dtype=dtype, offset=offset
         )[slices]
-        return delayed_chunk
+        return memmap_chunk
 
-    # Create a template array and map blocks
+    # Create a dask array and map blocks
     data = da.empty(shape, dtype=dtype, chunks=chunks).map_blocks(
         build_block, dtype=dtype
     )
