@@ -279,7 +279,9 @@ def get_spectral_profile_dask(data, region, hdr):
         mask_3d = da.broadcast_to(mask[None, :, :], data.shape)
         mdata = da.where(mask_3d, data, da.nan)
 
-    beam_area = np.pi * hdr["BMAJ"] * hdr["BMIN"] / (4 * np.log(2))
+    beam_area = (
+        np.pi * hdr["BMAJ"] * hdr["BMIN"] / (4 * np.log(2)) / hdr["PIX_AREA"]
+    )
 
     profiles = da.map_blocks(
         numba_stats,
