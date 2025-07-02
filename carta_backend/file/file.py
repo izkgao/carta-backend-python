@@ -394,7 +394,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     t0 = perf_counter_ns()
 
     # Read file information
-    with fits.open(file_path, memmap=True) as hdul:
+    with fits.open(file_path, memmap=True, mode="denywrite") as hdul:
         hdu = hdul[hdu_index]
         dtype = np.dtype(hdu.data.dtype)
         shape = hdu.data.shape
