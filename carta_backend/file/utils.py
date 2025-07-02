@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import dask.array as da
+import numba as nb
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
@@ -741,3 +742,65 @@ def load_data(
     else:
         clog.error(f"Unsupported data type: {type(data)}")
         return None
+
+
+@nb.njit((nb.bool(nb.float32)), fastmath=True)
+def isnan_f32(x):
+    bits = np.float32(x).view(np.uint32)
+    exp_mask = 0x7F800000
+    frac_mask = 0x007FFFFF
+    return (bits & exp_mask) == exp_mask and (bits & frac_mask) != 0
+
+
+@nb.njit(fastmath=True)
+def isinf_f32(x):
+    bits = np.float32(x).view(np.uint32)
+    exp_mask = 0x7F800000
+    frac_mask = 0x007FFFFF
+    return (bits & exp_mask) == exp_mask and (bits & frac_mask) == 0
+
+
+@nb.njit((nb.bool(nb.float32)), fastmath=True)
+def isfinite_f32(x):
+    bits = np.float32(x).view(np.uint32)
+    exp_mask = 0x7F800000
+    return (bits & exp_mask) != exp_mask
+
+
+@nb.njit(
+    (nb.float32[:, :](nb.float32[:, :], nb.int32)),
+    parallel=True,
+    fastmath=True,
+)
+def block_reduce_numba(arr, factor):
+    rows, cols = arr.shape
+    block_rows, block_cols = factor, factor
+
+    n_block_rows = rows // factor
+    n_block_cols = cols // factor
+
+    result = np.empty((n_block_rows, n_block_cols), dtype=np.float32)
+
+    for i in nb.prange(n_block_rows):
+        for j in range(n_block_cols):
+            row_start = i * block_rows
+            row_end = min(row_start + block_rows, rows)
+            col_start = j * block_cols
+            col_end = min(col_start + block_cols, cols)
+
+            sum_val = 0.0
+            count = 0
+
+            for ii in range(row_start, row_end):
+                for jj in range(col_start, col_end):
+                    val = arr[ii, jj]
+                    if isfinite_f32(val):
+                        sum_val += val
+                        count += 1
+
+            if count == 0:
+                result[i, j] = np.nan
+            else:
+                result[i, j] = sum_val / count
+
+    return result

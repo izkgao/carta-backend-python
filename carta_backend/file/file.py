@@ -10,19 +10,19 @@ import dask.array as da
 import numpy as np
 import psutil
 from astropy.io import fits
-from astropy.nddata import block_reduce
 from astropy.wcs import WCS, FITSFixedWarning
 from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (
+    block_reduce_numba,
     get_file_type,
     get_header_from_xradio,
     load_data,
 )
 from carta_backend.log import logger
-from carta_backend.tile import layer_to_mip
+from carta_backend.tile import decode_tile_coord, layer_to_mip
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -149,11 +149,7 @@ class FileManager:
                     trim_excess=True,
                 )
             elif isinstance(data, np.ndarray):
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", category=RuntimeWarning)
-                    data = block_reduce(
-                        data, (mip, mip), getattr(np, coarsen_func)
-                    )
+                data = block_reduce_numba(data, mip)
         else:
             if isinstance(data, np.ndarray) and use_memmap:
                 data = data[:]
@@ -183,6 +179,9 @@ class FileManager:
             wcs=wcs,
         )
         return data
+
+    def get_tile(self, file_id, tile_coord, channel, stokes, time=0):
+        x, y, layer = decode_tile_coord(tile_coord)
 
     def close(self, file_id):
         """Remove a file from the manager."""
