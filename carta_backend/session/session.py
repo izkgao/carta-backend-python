@@ -452,10 +452,24 @@ class Session:
         response.file_id = file_id
         response.file_info.CopyFrom(file_info)
         fex_dict = get_file_info_extended([header], file_name)
-        response.file_info_extended.CopyFrom(list(fex_dict.values())[0])
+        file_info_extended = list(fex_dict.values())[0]
+        response.file_info_extended.CopyFrom(file_info_extended)
 
-        # Not implemented yet
-        # response.beam_table
+        # Not fully implemented yet
+        beam = CARTA.Beam()
+        beam.channel = -1
+        beam.stokes = -1
+        send_beam = False
+        for i in file_info_extended.header_entries:
+            if i.name == "BMAJ":
+                beam.major_axis = float(i.value) * 3600
+                send_beam = True
+            elif i.name == "BMIN":
+                beam.minor_axis = float(i.value) * 3600
+            elif i.name == "BPA":
+                beam.pa = float(i.value)
+        if send_beam:
+            response.beam_table.append(beam)
 
         # Send message
         event_type = CARTA.EventType.OPEN_FILE_ACK
