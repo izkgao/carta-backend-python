@@ -22,7 +22,7 @@ from carta_backend.file.utils import (
     load_data,
 )
 from carta_backend.log import logger
-from carta_backend.tile import decode_tile_coord, layer_to_mip
+from carta_backend.tile import layer_to_mip
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -180,9 +180,6 @@ class FileManager:
         )
         return data
 
-    def get_tile(self, file_id, tile_coord, channel, stokes, time=0):
-        x, y, layer = decode_tile_coord(tile_coord)
-
     def close(self, file_id):
         """Remove a file from the manager."""
         if file_id in self.files:
@@ -301,7 +298,7 @@ def mmap_dask_array_old(filename, shape, dtype, offset=0, chunks="auto"):
     return da.block(nested_blocks)
 
 
-def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+def mmap_dask_array_old_v2(filename, shape, dtype, offset=0, chunks="auto"):
     def build_block(_, block_info=None):
         # Create slices from the chunk indices
         idx_tuple = block_info[0]["array-location"]
@@ -318,6 +315,79 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
         build_block, dtype=dtype
     )
     return data
+
+
+def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+    """
+    Maps a file to a Dask Array using memory mapping.
+
+    This function is derived from code in the RosettaSciIO project
+    (https://github.com/hyperspy/rosettasciio), Copyright 2007–2025
+    The HyperSpy developers, and distributed under the terms of the
+    GNU General Public License v3 (GPLv3).
+
+    Modifications made by Zhen-Kai Gao under the same GPLv3 license.
+
+    Parameters
+    ----------
+    filename : str
+        The file to be mapped.
+    shape : tuple
+        The shape of the array.
+    dtype : dtype
+        The data type of the array.
+    offset : int, optional
+        The offset in bytes from the start of the file. Default is 0.
+    chunks : str or tuple, optional
+        The chunk size of the Dask Array. Default is "auto".
+
+    Returns
+    -------
+    dask_array : dask.array.Array
+        The Dask Array mapped to the file.
+    """
+
+    # Normalize chunks
+    normalized_chunks = da.core.normalize_chunks(
+        chunks=chunks, shape=shape, dtype=dtype
+    )
+
+    # Pre-compute all slice information
+    chunk_grid_shape = tuple(
+        len(chunks_dim) for chunks_dim in normalized_chunks
+    )
+    slice_array = np.empty(chunk_grid_shape + (len(shape), 2), dtype=int)
+
+    for block_id in np.ndindex(chunk_grid_shape):
+        for dim in range(len(shape)):
+            start = sum(normalized_chunks[dim][: block_id[dim]])
+            stop = start + normalized_chunks[dim][block_id[dim]]
+            slice_array[block_id][dim] = [start, stop]
+
+    # Convert slice array to dask array
+    slice_dask = da.from_array(
+        slice_array,
+        chunks=(1,) * len(chunk_grid_shape) + slice_array.shape[-2:],
+    )
+
+    def load_chunk_from_slices(slice_specs):
+        """Load chunk using pre-computed slice specifications."""
+        slice_specs = np.squeeze(slice_specs)[()]
+        slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
+
+        memmap_data = np.memmap(
+            filename, mode="r", shape=shape, dtype=dtype, offset=offset
+        )
+        return memmap_data[slices]
+
+    # Use map_blocks with pre-computed slices
+    return da.map_blocks(
+        load_chunk_from_slices,
+        slice_dask,
+        dtype=dtype,
+        chunks=normalized_chunks,
+        drop_axis=list(range(len(chunk_grid_shape), len(slice_dask.shape))),
+    )
 
 
 def get_fits_FileData(file_id, file_path, hdu_index):
