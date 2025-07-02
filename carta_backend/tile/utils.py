@@ -3,6 +3,10 @@ import math
 import numba as nb
 import numpy as np
 from numba import njit
+from zfpy import compress_numpy
+
+from carta_backend import proto as CARTA
+from carta_backend.config.config import MAX_COMPRESSION_QUALITY
 
 
 def layer_to_mip(layer, image_shape, tile_shape=(256, 256)):
@@ -182,3 +186,32 @@ def fill_nan_with_block_average(data):
                         if np.isnan(flat_result[idx]):
                             flat_result[idx] = average
     return result
+
+
+def _compress_tile(data, precision):
+    prev_ratio = -1
+    while True:
+        comp_data = compress_numpy(
+            data, precision=precision, write_header=False
+        )
+        comp_ratio = data.nbytes / len(comp_data)
+        if comp_ratio == prev_ratio:
+            break
+        elif comp_ratio <= 20 or precision == MAX_COMPRESSION_QUALITY:
+            break
+        else:
+            precision = (precision + MAX_COMPRESSION_QUALITY + 1) // 2
+    return comp_data, precision
+
+
+def compress_tile(data, compression_type, compression_quality):
+    if compression_type == CARTA.CompressionType.ZFP:
+        comp_data, precision = _compress_tile(data, compression_quality)
+    elif compression_type == CARTA.CompressionType.SZ:
+        # Not implemented yet
+        comp_data = data.tobytes()
+        precision = compression_quality
+    else:
+        comp_data = data.tobytes()
+        precision = compression_quality
+    return comp_data, precision

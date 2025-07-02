@@ -7,7 +7,6 @@ from typing import Any, Optional, Tuple
 
 import dask.array as da
 import numpy as np
-import zfpy
 from aioitertools import iter
 from astropy.io import fits
 from dask.distributed import Client, as_completed
@@ -36,6 +35,7 @@ from carta_backend.region.utils import (
     parse_region,
 )
 from carta_backend.tile import (
+    compress_tile,
     decode_tile_coord,
     get_nan_encodings_block,
     get_tile_slice,
@@ -695,15 +695,16 @@ class Session:
 
         # Compress data
         t0 = perf_counter_ns()
-        if compression_type == CARTA.CompressionType.ZFP:
-            comp_data = zfpy.compress_numpy(
-                data, precision=compression_quality, write_header=False
+
+        comp_data, precision = compress_tile(
+            data, compression_type, compression_quality
+        )
+
+        if precision > compression_quality:
+            pflog.debug(
+                f"Upgraded precision to {precision} "
+                f"(originally requested precision: {compression_quality})."
             )
-        elif compression_type == CARTA.CompressionType.SZ:
-            # Not implemented yet
-            comp_data = data.tobytes()
-        else:
-            comp_data = data.tobytes()
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
@@ -716,7 +717,7 @@ class Session:
         resp_data.channel = channel
         resp_data.stokes = stokes
         resp_data.compression_type = compression_type
-        resp_data.compression_quality = compression_quality
+        resp_data.compression_quality = precision
         resp_data.sync_id = file_id + 1
         # resp_data.animation_id = 0
 
