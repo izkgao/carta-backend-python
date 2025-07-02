@@ -200,7 +200,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.REGISTER_VIEWER_ACK
         message = self.encode_message(event_type, request_id, response)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         # Import (compile) numba functions here
         # This block is good for doing time-consuming tasks
@@ -267,7 +267,7 @@ class Session:
             response.message = msg
             event_type = CARTA.EventType.FILE_LIST_RESPONSE
             message = self.encode_message(event_type, request_id, response)
-            await self.queue.put(message)
+            self.queue.put_nowait(message)
             return None
 
         # Lists of files and directories
@@ -293,7 +293,7 @@ class Session:
                             event_type, request_id, response
                         )
                         # Send message
-                        await self.queue.put(message)
+                        self.queue.put_nowait(message)
                         return None
 
                 # Full path of item
@@ -344,7 +344,7 @@ class Session:
 
         event_type = CARTA.EventType.FILE_LIST_RESPONSE
         message = self.encode_message(event_type, request_id, response)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
         return None
 
     async def do_StopFileList(self, message: bytes) -> None:
@@ -401,7 +401,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.FILE_INFO_RESPONSE
         message = self.encode_message(event_type, request_id, response)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
         return None
 
     async def do_CloseFile(self, message: bytes) -> None:
@@ -460,7 +460,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.OPEN_FILE_ACK
         message = self.encode_message(event_type, request_id, response)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         # RegionHistogramData
         self.hist_events[file_id] = asyncio.Event()
@@ -529,7 +529,7 @@ class Session:
         msg = f"Fill image histogram in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
         pflog.debug(msg)
 
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         # Mark histogram as ready
         self.hist_events[file_id].set()
@@ -559,7 +559,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_type, request_id, resp_sync)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         priority = next(self.priority_counter)
 
@@ -654,7 +654,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.RASTER_TILE_SYNC
         message = self.encode_message(event_type, request_id, resp_sync)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         msg = f"Get tile data group in {dt:.3f} ms"
         pflog.debug(msg)
@@ -737,7 +737,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.RASTER_TILE_DATA
         message = self.encode_message(event_type, request_id, resp_data)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         return None
 
@@ -1067,7 +1067,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.SPATIAL_PROFILE_DATA
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Fill spatial profile in {dt:.3f} ms"
@@ -1153,7 +1153,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
@@ -1238,7 +1238,7 @@ class Session:
         resp.region_id = region_id
         event_type = CARTA.EventType.SET_REGION_ACK
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
 
         # Send spectral profile
         if self.spec_prof_on:
@@ -1343,7 +1343,7 @@ class Session:
             resp.message = msg
             event_type = CARTA.EventType.REGION_LIST_RESPONSE
             message = self.encode_message(event_type, request_id, resp)
-            await self.queue.put(message)
+            self.queue.put_nowait(message)
             return None
 
         # Lists of files and directories
@@ -1400,7 +1400,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.REGION_LIST_RESPONSE
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
         return None
 
     async def do_RegionFileInfoRequest(self, message: bytes) -> None:
@@ -1436,7 +1436,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.REGION_FILE_INFO_RESPONSE
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
         return None
 
     async def do_ImportRegion(self, message: bytes) -> None:
@@ -1477,7 +1477,7 @@ class Session:
         # Send message
         event_type = CARTA.EventType.IMPORT_REGION_ACK
         message = self.encode_message(event_type, request_id, resp)
-        await self.queue.put(message)
+        self.queue.put_nowait(message)
         return None
 
     async def do_RemoveRegion(self, message: bytes) -> None:
