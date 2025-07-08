@@ -638,8 +638,41 @@ def get_header_from_xradio_old(xarr):
     return hdr
 
 
+def get_fits_dask_channels_chunks(wcs: WCS) -> tuple:
+    """
+    Get a tuple of chunk sizes for creating a Dask array from a FITS file.
+
+    The chunk sizes are determined by the WCS coordinate types. The RA and DEC
+    coordinates should be chunked automatically, while the FREQ and STOKES
+    coordinates should be chunked with a chunk size of 1.
+
+    Parameters
+    ----------
+    wcs : WCS
+        The WCS object from the FITS file.
+
+    Returns
+    -------
+    tuple
+        A tuple of chunk sizes for creating a Dask array from the FITS file.
+    """
+    # Get coordinate types from WCS
+    ctypes = [ctype.upper() for ctype in wcs.wcs.ctype][::-1]
+    chunks = []
+    for ctype in ctypes:
+        if ctype.startswith("RA"):
+            chunks.append("auto")
+        elif ctype.startswith("DEC"):
+            chunks.append("auto")
+        elif ctype.startswith("FREQ"):
+            chunks.append(1)
+        elif ctype.startswith("STOKES"):
+            chunks.append(1)
+    return tuple(chunks)
+
+
 def load_fits_data(
-    data: Union[np.ndarray, da.Array],
+    data: Union[np.ndarray, np.memmap, da.Array],
     wcs: WCS,
     x=None,
     y=None,
@@ -651,7 +684,7 @@ def load_fits_data(
 
     Parameters
     ----------
-    data : Union[np.ndarray, da.Array]
+    data : Union[np.ndarray, np.memmap, da.Array]
         The input data array (numpy or dask)
     wcs : WCS
         The WCS object containing coordinate information
@@ -703,7 +736,11 @@ def load_fits_data(
             slices[data_axis] = data_slice
 
     # Apply the slices to the data
-    return data[tuple(slices)]
+    result = data[tuple(slices)]
+
+    if isinstance(result, np.memmap):
+        result = np.asarray(result)
+    return result
 
 
 async def async_load_xradio_data(
@@ -740,7 +777,7 @@ def load_data(
     data, x=None, y=None, channel=None, stokes=None, time=0, wcs=None
 ) -> Optional[da.Array]:
     # Dask array from FITS
-    if isinstance(data, da.Array) or isinstance(data, np.ndarray):
+    if isinstance(data, (da.Array, np.ndarray, np.memmap)):
         return load_fits_data(data, wcs, x, y, channel, stokes)
     # Xarray Dataset from Xradio
     elif isinstance(data, Dataset):
@@ -951,6 +988,7 @@ def get_zarr_info(file_path: Union[str, Path]) -> Tuple:
         - order: The memory layout order ('C' for row-major, 'F' for column-major).
         - compressor_config: The compression configuration of the Zarr array.
     """
+    file_path = Path(file_path)
     with open(file_path / "SKY" / ".zarray", "r") as f:
         sky = json.load(f)
         compressor_config = sky["compressor"]

@@ -134,7 +134,7 @@ def decode_tile_coord(encoded_coord):
     return x, y, layer
 
 
-@njit(nb.float32[:, ::1](nb.float32[:, ::1]))
+@njit(nb.float32[:, :](nb.float32[:, :]))
 def fill_nan_with_block_average(data):
     """
     Fill NaN values in a 2D array with the average of non-NaN

@@ -491,7 +491,6 @@ class Session:
         region_id: int,
         channel: int = 0,
         stokes: int = 0,
-        mip: int = 1,
     ) -> None:
         """
         This executes when the image is first loaded and
@@ -500,7 +499,10 @@ class Session:
         # Load image
         t0 = perf_counter_ns()
 
-        data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
+        # data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
+        data = await asyncio.to_thread(
+            self.fm.get_channel, file_id, channel, stokes
+        )
 
         dt = (perf_counter_ns() - t0) / 1e6
 
@@ -589,11 +591,14 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
-            # Send full image
-            data = await self.fm.get_slice(file_id, channel, stokes)
+            # Send the entire image in full resolution
+            # data = await self.fm.get_slice(file_id, channel, stokes)
+            data = await asyncio.to_thread(
+                self.fm.get_channel, file_id, channel, stokes
+            )
             if isinstance(data, da.Array):
                 data = await self.client.compute(data[:, :], priority=priority)
-            await self.send_RasterTileData(
+            self.send_RasterTileData(
                 request_id=request_id,
                 file_id=file_id,
                 data=data,
@@ -605,8 +610,12 @@ class Session:
         else:
             # Send tiles
             layer = decode_tile_coord(tiles[0])[2]
-            data = await self.fm.get_slice(
-                file_id, channel, stokes, layer=layer
+            data = await asyncio.to_thread(
+                self.fm.get_all_tiles,
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                layer=layer,
             )
             image_shape = self.fm.files[file_id].img_shape
 
@@ -624,29 +633,27 @@ class Session:
                 # async with self.lock:
                 #     self.tile_futures[priority] = futures
 
-                async with asyncio.TaskGroup() as tg:
-                    async for future in as_completed(futures):
-                        x, y, layer = futures[future]
-                        tg.create_task(
-                            self.send_RasterTileData(
-                                request_id=request_id,
-                                file_id=file_id,
-                                data=await future,
-                                compression_type=compression_type,
-                                compression_quality=compression_quality,
-                                channel=channel,
-                                stokes=stokes,
-                                x=x,
-                                y=y,
-                                layer=layer,
-                            )
-                        )
+                async for future in as_completed(futures):
+                    x, y, layer = futures[future]
+                    self.send_RasterTileData(
+                        request_id=request_id,
+                        file_id=file_id,
+                        data=await future,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        x=x,
+                        y=y,
+                        layer=layer,
+                    )
             else:
+                # NumPy array
                 async for tile in iter(tiles):
                     x, y, layer = decode_tile_coord(tile)
                     slicey, slicex = get_tile_slice(x, y, layer, image_shape)
                     idata = data[slicey, slicex]
-                    await self.send_RasterTileData(
+                    self.send_RasterTileData(
                         request_id=request_id,
                         file_id=file_id,
                         data=idata,
@@ -675,7 +682,7 @@ class Session:
 
         return None
 
-    async def send_RasterTileData(
+    def send_RasterTileData(
         self,
         request_id: int,
         file_id: int,
@@ -697,7 +704,7 @@ class Session:
 
         # Fill NaNs
         t0 = perf_counter_ns()
-        data = self.fill_nan_with_block_average(data.astype(np.float32))
+        data = self.fill_nan_with_block_average(data)
         dt = (perf_counter_ns() - t0) / 1e6
         msg = f"Fill NaN with block average in {dt:.3f} ms"
         pflog.debug(msg)

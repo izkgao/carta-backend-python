@@ -1,7 +1,9 @@
+import asyncio
 import os
 import warnings
 from dataclasses import dataclass
 from glob import glob
+from pathlib import Path
 from time import perf_counter_ns
 from typing import Tuple
 
@@ -17,9 +19,11 @@ from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (
     block_reduce_numba,
     get_file_type,
+    get_fits_dask_channels_chunks,
     get_header_from_xradio,
     load_data,
     mmap_dask_array,
+    read_zarr_slice,
 )
 from carta_backend.log import logger
 from carta_backend.tile import layer_to_mip
@@ -31,14 +35,16 @@ ptlog = logger.bind(name="Protocol")
 
 @dataclass
 class FileData:
+    file_path: Path
     data: np.ndarray | da.Array | Dataset
+    memmap: np.ndarray | Dataset | None
+    dask_channels: da.Array | None
     header: fits.Header
     wcs: WCS
     file_type: int
     hdu_index: int
     img_shape: Tuple[int, int]
-    memmap: np.ndarray | Dataset | None
-    hist_on: bool
+    hist_on: bool | asyncio.Event
     data_size: float  # Unit: MiB
     frame_size: float  # Unit: MiB
 
@@ -47,7 +53,12 @@ class FileManager:
     def __init__(self, client=None):
         self.files = {}
         self.cache = {}
+        self.channel_cache = {}
         self.client = client
+
+        self.avail_mem = (
+            psutil.virtual_memory().available / 1024**2
+        )  # Unit: MiB
 
     async def open(self, file_id, file_path, hdu_index=None):
         if file_id in self.files:
@@ -111,9 +122,8 @@ class FileManager:
         # If the frame size is less than half of the available memory,
         # load the full frame into memory
         frame_size = self.files[file_id].frame_size
-        available_mem = psutil.virtual_memory().available / 1024**2
 
-        if isinstance(channel, int) and (frame_size <= (available_mem * 0.5)):
+        if isinstance(channel, int) and (frame_size <= (self.avail_mem * 0.5)):
             use_memmap = True
 
         full_frame_name = f"{file_id}_{channel}_{stokes}_{time}_1"
@@ -156,7 +166,7 @@ class FileManager:
 
         # Convert to float32 to avoid using dtype >f4
         if isinstance(data, np.ndarray):
-            data = data.astype("float32")
+            data = data.astype(np.float32, copy=False)
 
         # Load data into memory
         if use_memmap and isinstance(data, da.Array):
@@ -164,6 +174,149 @@ class FileManager:
 
         # Cache data
         self.cache[name] = data
+        return data
+
+    def get_channel(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+    ):
+        # Generate names
+        name = f"{file_id}_{channel}_{stokes}_{time}"
+        clog.debug(f"Getting channel for {name}")
+        clog.debug(f"Channel cache keys: {list(self.channel_cache.keys())}")
+
+        # Check cache
+        if name in list(self.channel_cache.keys()):
+            clog.debug(f"Using cached data for {name}")
+            return self.channel_cache[name]
+        else:
+            # This means that the user is viewing another channel/stokes
+            # so we can clear the channel cache of previous channel/stokes
+            for key in list(self.channel_cache.keys()):
+                if not key.startswith(name) and channel is not None:
+                    clog.debug(f"Clearing channel cache for {key}")
+                    del self.channel_cache[key]
+
+        # If the frame size is less than half of the available memory,
+        # load the full frame into memory
+        frame_size = self.files[file_id].frame_size
+        if frame_size > (self.avail_mem * 0.5):
+            use_dask = True
+        else:
+            use_dask = False
+
+        # Load data
+        file_type = self.files[file_id].file_type
+        wcs = self.files[file_id].wcs
+
+        if use_dask:
+            # Can be FITS or Zarr
+            _data = self.files[file_id].dask_channels
+            data = load_data(
+                data=_data,
+                x=None,
+                y=None,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                wcs=wcs,
+            )
+        else:
+            if file_type == CARTA.FileType.FITS:
+                _data = self.files[file_id].memmap
+                data = load_data(
+                    data=_data,
+                    x=None,
+                    y=None,
+                    channel=channel,
+                    stokes=stokes,
+                    time=time,
+                    wcs=wcs,
+                )
+            elif file_type == CARTA.FileType.CASA:
+                file_path = self.files[file_id].file_path
+                data = read_zarr_slice(
+                    file_path=file_path,
+                    time=time,
+                    frequency=channel,
+                    polarization=stokes,
+                    max_workers=2,
+                )
+
+        if isinstance(data, np.ndarray):
+            # Convert to float32 to avoid using dtype >f4
+            t0 = perf_counter_ns()
+            data = data.astype(np.float32, copy=False)
+            dt = (perf_counter_ns() - t0) / 1e6
+            msg = f"Converted to float32 in {dt:.3f} ms"
+            clog.debug(msg)
+            # Cache data
+            self.channel_cache[name] = data
+
+        return data
+
+    def get_all_tiles(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        layer=None,
+        mip=1,
+    ):
+        # Convert layer to mip
+        if layer is not None:
+            mip = layer_to_mip(
+                layer,
+                image_shape=self.files[file_id].img_shape,
+                tile_shape=TILE_SHAPE,
+            )
+
+        # If mip <= 1, return the full frame
+        if mip <= 1:
+            data = self.get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+            return data
+
+        # Generate names
+        name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+        frame_name = f"{file_id}_{channel}_{stokes}_{time}"
+        clog.debug(f"Getting channel for {name}")
+        clog.debug(f"Channel cache keys: {list(self.channel_cache.keys())}")
+
+        # Check cache
+        if name in list(self.channel_cache.keys()):
+            clog.debug(f"Using cached channel for {name}")
+            data = self.channel_cache[frame_name]
+        else:
+            data = self.get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+
+        # Coarsen
+        if isinstance(data, da.Array):
+            data = da.coarsen(
+                da.nanmean,
+                data,
+                {0: mip, 1: mip},
+                trim_excess=True,
+            )
+        elif isinstance(data, np.ndarray):
+            data = block_reduce_numba(data, mip)
+
+        # Convert to float32 to avoid using dtype >f4
+        data = data.astype(np.float32, copy=False)
+
         return data
 
     def get_point_spectrum(self, file_id, x, y, channel, stokes, time=0):
@@ -225,9 +378,13 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     msg = f"Read file info in {dt:.3f} ms"
     clog.debug(msg)
 
-    t0 = perf_counter_ns()
+    # Create WCS
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", FITSFixedWarning)
+        wcs = WCS(header)
 
-    # Read file as dask array
+    # Create dask array
+    t0 = perf_counter_ns()
     data = mmap_dask_array(
         filename=file_path,
         shape=shape,
@@ -238,10 +395,22 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     dt = (perf_counter_ns() - t0) / 1e6
     msg = f"Create dask array in {dt:.3f} ms"
     clog.debug(msg)
+
+    # Create dask channels
     t0 = perf_counter_ns()
+    chunks = get_fits_dask_channels_chunks(wcs)
+    dask_channels = mmap_dask_array(
+        filename=file_path,
+        shape=shape,
+        dtype=dtype,
+        offset=offset,
+        chunks=chunks,
+    )
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Create dask channels array in {dt:.3f} ms"
+    clog.debug(msg)
 
     # Get and set image information
-    wcs = WCS(header, fix=False)
     header["PIX_AREA"] = np.abs(
         np.linalg.det(wcs.celestial.pixel_scale_matrix)
     )
@@ -252,25 +421,27 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     clog.debug(f"File ID '{file_id}' opened successfully")
     clog.debug(f"File dimensions: {shape}, chunking: {str(data.chunksize)}")
 
-    memmap = fits.getdata(file_path, hdu_index, memmap=True)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FITSFixedWarning)
-        wcs = WCS(header)
-
-    header["PIX_AREA"] = np.abs(
-        np.linalg.det(wcs.celestial.pixel_scale_matrix)
+    # Create memmap
+    memmap = np.memmap(
+        file_path,
+        mode="r",
+        shape=shape,
+        dtype=dtype,
+        offset=offset,
     )
 
+    # Create FileData
     filedata = FileData(
+        file_path=Path(file_path),
         data=data,
+        dask_channels=dask_channels,
         header=header,
         wcs=wcs,
         file_type=CARTA.FileType.FITS,
         hdu_index=hdu_index,
         img_shape=img_shape,
         memmap=memmap,
-        hist_on=False,
+        hist_on=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
     )
@@ -316,13 +487,15 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         wcs = WCS(header)
 
     filedata = FileData(
+        file_path=Path(file_path),
         data=data,
+        dask_channels=data,
+        memmap=memmap,
         header=header,
         wcs=wcs,
         file_type=CARTA.FileType.CASA,
         hdu_index=None,
         img_shape=img_shape,
-        memmap=memmap,
         hist_on=False,
         data_size=data_size,
         frame_size=frame_size,
