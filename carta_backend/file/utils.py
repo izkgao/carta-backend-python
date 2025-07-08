@@ -1,12 +1,17 @@
+import json
 import os
+from concurrent.futures import ThreadPoolExecutor
+from itertools import product
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import dask.array as da
 import numba as nb
 import numpy as np
 from astropy.coordinates import SkyCoord
+from astropy.io import fits
 from astropy.wcs import WCS
+from numcodecs import get_codec
 from xarray import Dataset
 
 from carta_backend import proto as CARTA
@@ -804,3 +809,277 @@ def block_reduce_numba(arr, factor):
                 result[i, j] = sum_val / count
 
     return result
+
+
+def get_chunk_read_plan(
+    shape: Tuple[int], chunk_shape: Tuple[int], indices: Tuple[int | slice]
+) -> Tuple:
+    """
+    Compute a plan for reading chunks from a zarr array based on the given
+    indices.
+
+    The function takes the shape of the array, the chunk shape, and the indices
+    as input. It returns a list of dictionaries, where each dictionary describes
+    a chunk to be read, and the output shape of the concatenated chunks.
+
+    Each dictionary in the list contains the following keys:
+
+    - ``chunk_id``: a string representing the chunk coordinates, joined by
+      periods.
+    - ``chunk_coords``: a tuple of integers representing the chunk coordinates.
+    - ``chunk_slice``: a tuple of slices representing the slice of the chunk
+      to be read.
+    - ``global_slice``: a tuple of slices representing the slice of the output
+      array corresponding to the chunk.
+
+    Parameters
+    ----------
+    shape : tuple of int
+        The shape of the array.
+    chunk_shape : tuple of int
+        The shape of the chunks.
+    indices : tuple of int or slice
+        The indices of the array to be read.
+
+    Returns
+    -------
+    plans : list of dict
+        The list of dictionaries describing the chunks to be read.
+    output_shape : tuple of int
+        The shape of the output array.
+    """
+    chunk_ranges = []
+    slice_ranges = []
+    output_shape = []
+
+    for dim_size, chunk_size, idx in zip(shape, chunk_shape, indices):
+        if isinstance(idx, int):
+            chunk_idx = idx // chunk_size
+            offset_in_chunk = idx % chunk_size
+            chunk_ranges.append([chunk_idx])
+            slice_ranges.append(
+                {chunk_idx: offset_in_chunk}
+            )  # scalar, not a slice
+            output_shape.append(1)
+        elif isinstance(idx, slice):
+            start = 0 if idx.start is None else idx.start
+            stop = dim_size if idx.stop is None else min(idx.stop, dim_size)
+            start_chunk = start // chunk_size
+            stop_chunk = (stop - 1) // chunk_size
+            chunks_in_dim = list(range(start_chunk, stop_chunk + 1))
+            chunk_ranges.append(chunks_in_dim)
+
+            ranges = {}
+            for chunk_idx in chunks_in_dim:
+                chunk_start = chunk_idx * chunk_size
+                chunk_end = min(chunk_start + chunk_size, dim_size)
+
+                slice_start = max(start, chunk_start)
+                slice_end = min(stop, chunk_end)
+
+                # Local offset inside the chunk
+                local_start = slice_start - chunk_start
+                local_end = slice_end - chunk_start
+
+                ranges[chunk_idx] = slice(local_start, local_end)
+            slice_ranges.append(ranges)
+            output_shape.append(stop - start)
+        else:
+            raise ValueError("Unsupported index type")
+
+    plans = []
+    for chunk_coords in product(*chunk_ranges):
+        chunk_id = ".".join(map(str, chunk_coords))
+        chunk_slice = []
+        global_slice = []
+
+        for axis, (chunk_idx, chunk_size, index_info) in enumerate(
+            zip(chunk_coords, chunk_shape, slice_ranges)
+        ):
+            if isinstance(indices[axis], int):
+                offset = index_info[chunk_idx]
+                chunk_slice.append(slice(offset, offset + 1))
+                global_slice.append(slice(0, 1))
+            else:
+                s = index_info[chunk_idx]
+                chunk_slice.append(s)
+
+                start = chunk_idx * chunk_size + s.start
+                full_start = (
+                    0 if indices[axis].start is None else indices[axis].start
+                )
+                global_slice.append(
+                    slice(
+                        start - full_start,
+                        start - full_start + (s.stop - s.start),
+                    )
+                )
+
+        plans.append(
+            {
+                "chunk_id": chunk_id,
+                "chunk_coords": chunk_coords,
+                "chunk_slice": tuple(chunk_slice),
+                "global_slice": tuple(global_slice),
+            }
+        )
+    plans.sort(key=lambda p: p["chunk_coords"])
+    return plans, tuple(output_shape)
+
+
+def get_zarr_info(file_path: Union[str, Path]) -> Tuple:
+    """
+    Retrieve metadata information from a Zarr file.
+
+    This function reads the '.zarray' metadata file of a Zarr dataset to
+    extract information about the data's shape, chunking, data type, and
+    compression configuration.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+
+    Returns
+    -------
+    Tuple
+        A tuple containing:
+        - shape: The shape of the Zarr array.
+        - chunk_shape: The shape of the chunks in the Zarr array.
+        - dtype: The numpy data type of the Zarr array.
+        - order: The memory layout order ('C' for row-major, 'F' for column-major).
+        - compressor_config: The compression configuration of the Zarr array.
+    """
+    with open(file_path / "SKY" / ".zarray", "r") as f:
+        sky = json.load(f)
+        compressor_config = sky["compressor"]
+        shape = sky["shape"]
+        chunk_shape = sky["chunks"]
+        dtype = np.dtype(sky["dtype"])
+        order = sky.get("order", "C")
+    return shape, chunk_shape, dtype, order, compressor_config
+
+
+def get_fits_info(file_path: Union[str, Path], hdu_index: int = 0) -> Tuple:
+    """
+    Retrieve metadata information from a FITS file.
+
+    This function reads the header and data of a FITS file to extract
+    information about the data's shape, data type, offset, and header.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the FITS file.
+    hdu_index : int, optional
+        The index of the HDU to read. Defaults to 0.
+
+    Returns
+    -------
+    Tuple
+        A tuple containing:
+        - shape: The shape of the FITS data.
+        - dtype: The numpy data type of the FITS data.
+        - offset: The offset of the FITS data in the file.
+        - header: The header of the FITS file.
+    """
+    with fits.open(file_path, memmap=True, mode="denywrite") as hdul:
+        hdu = hdul[hdu_index]
+        dtype = np.dtype(hdu.data.dtype)
+        shape = hdu.data.shape
+        offset = hdu._data_offset
+        header = hdu.header
+    return shape, dtype, offset, header
+
+
+def read_zarr_slice(
+    file_path: Union[str, Path],
+    time: slice | int = slice(None),
+    frequency: slice | int = slice(None),
+    polarization: slice | int = slice(None),
+    ll: slice | int = slice(None),
+    mm: slice | int = slice(None),
+    max_workers: int = 2,
+) -> np.ndarray:
+    """
+    Read a slice of data from a Zarr file.
+
+    This function reads a slice of data from a Zarr file, taking into account
+    the chunking and compression of the data.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+    time : slice | int, optional
+        The slice of time to read. Defaults to slice(None).
+    frequency : slice | int, optional
+        The slice of frequency to read. Defaults to slice(None).
+    polarization : slice | int, optional
+        The slice of polarization to read. Defaults to slice(None).
+    ll : slice | int, optional
+        The slice of l to read. Defaults to slice(None).
+    mm : slice | int, optional
+        The slice of m to read. Defaults to slice(None).
+    max_workers : int, optional
+        The maximum number of workers to use for reading. Defaults to 2.
+
+    Returns
+    -------
+    np.ndarray
+        The slice of data read from the Zarr file.
+    """
+    file_path = Path(file_path)
+    shape, chunk_full_shape, dtype, order, comp_config = get_zarr_info(
+        file_path
+    )
+    slices = (time, frequency, polarization, ll, mm)
+    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
+
+    if comp_config is not None:
+        compressor = get_codec(comp_config)
+
+    result = np.empty(output_shape, dtype=dtype)
+
+    def read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+        chunk_data = np.memmap(
+            chunk_filename,
+            mode="r",
+            shape=chunk_full_shape,
+            dtype=dtype,
+            order=order,
+        )
+        data_piece = chunk_data[chunk_slice]
+        result[global_slice] = data_piece
+
+    def decomp_read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        with open(chunk_filename, "rb") as f:
+            compressed = f.read()
+            decompressed = compressor.decode(compressed)
+
+        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
+            chunk_full_shape, order=order
+        )
+        data_piece = chunk_data[chunk_slice]
+        result[global_slice] = data_piece
+
+    if comp_config is not None:
+        func = decomp_read_and_insert
+    else:
+        func = read_and_insert
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        _ = list(executor.map(func, plans))
+
+    return np.squeeze(np.swapaxes(result, 3, 4))
