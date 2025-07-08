@@ -317,7 +317,7 @@ def mmap_dask_array_old_v2(filename, shape, dtype, offset=0, chunks="auto"):
     return data
 
 
-def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+def mmap_dask_array_old_v3(filename, shape, dtype, offset=0, chunks="auto"):
     """
     Maps a file to a Dask Array using memory mapping.
 
@@ -363,6 +363,97 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
             start = sum(normalized_chunks[dim][: block_id[dim]])
             stop = start + normalized_chunks[dim][block_id[dim]]
             slice_array[block_id][dim] = [start, stop]
+
+    # Convert slice array to dask array
+    slice_dask = da.from_array(
+        slice_array,
+        chunks=(1,) * len(chunk_grid_shape) + slice_array.shape[-2:],
+    )
+
+    def load_chunk_from_slices(slice_specs):
+        """Load chunk using pre-computed slice specifications."""
+        slice_specs = np.squeeze(slice_specs)[()]
+        slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
+
+        memmap_data = np.memmap(
+            filename, mode="r", shape=shape, dtype=dtype, offset=offset
+        )
+        return memmap_data[slices]
+
+    # Use map_blocks with pre-computed slices
+    return da.map_blocks(
+        load_chunk_from_slices,
+        slice_dask,
+        dtype=dtype,
+        chunks=normalized_chunks,
+        drop_axis=list(range(len(chunk_grid_shape), len(slice_dask.shape))),
+    )
+
+
+def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
+    """
+    Maps a file to a Dask Array using memory mapping.
+
+    This function is derived from code in the RosettaSciIO project
+    (https://github.com/hyperspy/rosettasciio), Copyright 2007–2025
+    The HyperSpy developers, and distributed under the terms of the
+    GNU General Public License v3 (GPLv3).
+
+    Modifications made by Zhen-Kai Gao under the same GPLv3 license.
+
+    Parameters
+    ----------
+    filename : str
+        The file to be mapped.
+    shape : tuple
+        The shape of the array.
+    dtype : dtype
+        The data type of the array.
+    offset : int, optional
+        The offset in bytes from the start of the file. Default is 0.
+    chunks : str or tuple, optional
+        The chunk size of the Dask Array. Default is "auto".
+
+    Returns
+    -------
+    dask_array : dask.array.Array
+        The Dask Array mapped to the file.
+    """
+
+    # Normalize chunks
+    normalized_chunks = da.core.normalize_chunks(
+        chunks=chunks, shape=shape, dtype=dtype
+    )
+
+    # Pre-compute all slice information
+    chunk_grid_shape = tuple(
+        len(chunks_dim) for chunks_dim in normalized_chunks
+    )
+
+    # Pre-compute cumulative sums
+    cumsum_chunks = [
+        np.concatenate(([0], np.cumsum(chunks_dim)))
+        for chunks_dim in normalized_chunks
+    ]
+
+    # Create index arrays for each dimension
+    indices = [np.arange(n) for n in chunk_grid_shape]
+
+    # Use broadcasting to compute all slices at once
+    slice_starts = np.zeros(chunk_grid_shape + (len(shape),), dtype=int)
+    slice_stops = np.zeros(chunk_grid_shape + (len(shape),), dtype=int)
+
+    for dim in range(len(shape)):
+        # Create broadcasting-compatible shape
+        broadcast_shape = [1] * len(chunk_grid_shape)
+        broadcast_shape[dim] = chunk_grid_shape[dim]
+
+        dim_indices = indices[dim].reshape(broadcast_shape)
+        slice_starts[..., dim] = cumsum_chunks[dim][dim_indices]
+        slice_stops[..., dim] = cumsum_chunks[dim][dim_indices + 1]
+
+    # Combine into slice array
+    slice_array = np.stack([slice_starts, slice_stops], axis=-1)
 
     # Convert slice array to dask array
     slice_dask = da.from_array(
