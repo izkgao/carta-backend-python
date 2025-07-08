@@ -56,8 +56,9 @@ def get_release_info():
                 return f.read()
         else:
             # Fallback: Try lsb_release
-            result = subprocess.run(["lsb_release", "-a"],
-                                    capture_output=True, text=True)
+            result = subprocess.run(
+                ["lsb_release", "-a"], capture_output=True, text=True
+            )
             return (
                 result.stdout
                 if result.returncode == 0
@@ -67,11 +68,14 @@ def get_release_info():
     elif system == "Windows":  # Windows
         result = subprocess.run(
             ["wmic", "os", "get", "Caption,Version,BuildNumber"],
-            capture_output=True, text=True)
+            capture_output=True,
+            text=True,
+        )
         return (
             result.stdout
             if result.returncode == 0
-            else "Platform information not available")
+            else "Platform information not available"
+        )
 
     return "Platform information not available"
 
@@ -105,7 +109,8 @@ def get_folder_size(path: str) -> int:
     with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as executor:
         for dirpath, _, filenames in os.walk(path):
             sizes = executor.map(
-                lambda x: os.path.getsize(os.path.join(dirpath, x)), filenames)
+                lambda x: os.path.getsize(os.path.join(dirpath, x)), filenames
+            )
             total_size += sum(sizes)
     return total_size
 
