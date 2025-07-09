@@ -535,7 +535,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
             "x": {"start": 0, "end": None, "mip": 1, "width": 0},
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
-        cursor_coords=[None, None],
+        cursor_coords=[None, None, None],
         axes_dict=get_axes_dict(header),
     )
     return filedata
@@ -596,7 +596,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
             "x": {"start": 0, "end": None, "mip": 1, "width": 0},
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
-        cursor_coords=[None, None],
+        cursor_coords=[None, None, None],
         axes_dict=get_axes_dict(header),
     )
     return filedata

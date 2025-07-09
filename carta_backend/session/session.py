@@ -108,9 +108,6 @@ class Session:
         # Region
         self.region_dict = {}
 
-        # Task tokens for cursor movement
-        self.cursor_task_tokens = {}
-
     async def close(self):
         # Close dask client
         if self.client is not None:
@@ -936,8 +933,6 @@ class Session:
             sprx = self.fm.files[file_id].spat_req["x"]
             spry = self.fm.files[file_id].spat_req["y"]
             channel, stokes = self.channel_stokes
-            task_token = f"{file_id}_{x}_{y}_{perf_counter_ns()}"
-            self.cursor_task_tokens[file_id] = task_token
 
             params_for_sending = {
                 "slice_x": slice(sprx["start"], sprx["end"]),
@@ -945,7 +940,7 @@ class Session:
                 "mip": sprx["mip"],
                 "channel": channel,
                 "stokes": stokes,
-                "task_token": task_token,
+                "cursor_token": cursor_token,
             }
             send_spectral_profile = self.spec_prof_cursor_on
 
@@ -984,13 +979,12 @@ class Session:
         channel: int,
         stokes: int,
         region_id: int = None,
-        task_token: str = None,
+        cursor_token: int | None = None,
     ) -> None:
         t0 = perf_counter_ns()
 
         # Get data
         shape = self.fm.files[file_id].img_shape
-        # data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
         data = self.fm.get_channel_mip(file_id, channel, stokes, mip=mip)
 
         start = [slice_x.start, slice_y.start]
@@ -1023,36 +1017,32 @@ class Session:
                 ]
             )
 
-            # Check if this is still the current task before awaiting results
-            async with self.lock:
-                current_token = self.cursor_task_tokens.get(file_id)
-                if task_token is not None and current_token != task_token:
-                    # This task is no longer the current task
-                    # Cancel futures and abort
-                    msg = "Cancelling obsolete spatial profile "
-                    msg += f"calculation for {file_id}"
-                    pflog.debug(msg)
-                    for future in futures:
-                        future.cancel()
-                    return None
+            # Check if this is still the current task during computation
+            current_token = self.fm.files[file_id].cursor_coords[2]
+            if cursor_token is not None and cursor_token != current_token:
+                # This task is no longer the current task
+                # Cancel futures and abort
+                msg = "Cancelling obsolete spatial profile "
+                msg += f"calculation for {file_id}"
+                pflog.debug(msg)
+                for future in futures:
+                    future.cancel()
+                return None
 
             try:
                 # Await results (may raise if cancelled)
                 value, x_profile, y_profile = await asyncio.gather(*futures)
 
-                # Check again after computation in case cursor moved
-                # during computation
-                async with self.lock:
-                    current_token = self.cursor_task_tokens.get(file_id)
-                    if task_token is not None and current_token != task_token:
-                        # This task is no longer the current task, abort
-                        msg = "Discarding obsolete spatial profile "
-                        msg += f"results for {file_id}"
-                        pflog.debug(msg)
-                        return None
+                # Check if this is still the current task after computation
+                current_token = self.fm.files[file_id].cursor_coords[2]
+                if cursor_token is not None and cursor_token != current_token:
+                    # This task is no longer the current task
+                    # Cancel futures and abort
+                    pflog.debug("Discarding obsolete spatial profile")
+                    return None
             except Exception as e:
                 # Handle cancellation or other exceptions
-                msg = "Dask computation for spatial profile failed: "
+                msg = "Dask computation for spatial profile failed or was cancelled: "
                 msg += str(e)
                 pflog.debug(msg)
                 return None
@@ -1095,9 +1085,19 @@ class Session:
         sp.raw_values_fp32 = y_profile
         resp.profiles.append(sp)
 
-        # Send message
+        # Encode message
         event_type = CARTA.EventType.SPATIAL_PROFILE_DATA
         message = self.encode_message(event_type, request_id, resp)
+
+        # Check if this is still the current task before sending
+        current_token = self.fm.files[file_id].cursor_coords[2]
+        if cursor_token is not None and cursor_token != current_token:
+            # This task is no longer the current task
+            # Cancel futures and abort
+            pflog.debug("Discarding obsolete spatial profile")
+            return None
+
+        # Send message
         self.queue.put_nowait(message)
 
         dt = (perf_counter_ns() - t0) / 1e6
