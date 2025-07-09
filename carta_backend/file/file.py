@@ -46,7 +46,7 @@ class FileData:
     img_shape: Tuple[int, int]
     data_size: float  # Unit: MiB
     frame_size: float  # Unit: MiB
-    hist_on: bool | asyncio.Event
+    hist_event: asyncio.Event
     spat_req: Dict[str, Dict[str, int | None]]
     cursor_coords: List[int | None]
 
@@ -380,18 +380,42 @@ class FileManager:
 
         return data
 
-    def get_point_spectrum(self, file_id, x, y, channel, stokes, time=0):
-        data = self.files[file_id].data
+    def get_point_spectrum(
+        self,
+        file_id: str,
+        x: int,
+        y: int,
+        channel: int | slice | None,
+        stokes: int,
+        time: int = 0,
+    ):
+        # Load data
+        file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
-        data = load_data(
-            data=data,
-            x=x,
-            y=y,
-            channel=channel,
-            stokes=stokes,
-            time=time,
-            wcs=wcs,
-        )
+
+        if file_type == CARTA.FileType.FITS:
+            _data = self.files[file_id].memmap
+            data = load_data(
+                data=_data,
+                x=x,
+                y=y,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                wcs=wcs,
+            )
+        elif file_type == CARTA.FileType.CASA:
+            file_path = self.files[file_id].file_path
+            data = read_zarr_slice(
+                file_path=file_path,
+                time=time,
+                frequency=channel,
+                polarization=stokes,
+                ll=x,
+                mm=y,
+                max_workers=2,
+            )
+
         return data
 
     def close(self, file_id):
@@ -502,7 +526,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         hdu_index=hdu_index,
         img_shape=img_shape,
         memmap=memmap,
-        hist_on=asyncio.Event(),
+        hist_event=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
         spat_req={
@@ -562,7 +586,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         file_type=CARTA.FileType.CASA,
         hdu_index=None,
         img_shape=img_shape,
-        hist_on=False,
+        hist_event=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
         spat_req={

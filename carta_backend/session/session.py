@@ -88,9 +88,6 @@ class Session:
         # FileList
         self.flag_stop_file_list = False
 
-        # Histogram
-        self.hist_events = {}
-
         # Tiles
         self.tile_futures = {}
         self.priority_counter = itertools.count()
@@ -407,9 +404,6 @@ class Session:
 
         # If file is open, close it
         self.fm.close(file_id)
-        if file_id in self.hist_events:
-            self.hist_events[file_id].clear()
-            del self.hist_events[file_id]
 
         return None
 
@@ -471,7 +465,6 @@ class Session:
         self.queue.put_nowait(message)
 
         # RegionHistogramData
-        self.hist_events[file_id] = asyncio.Event()
         await self.send_RegionHistogramData(
             request_id=0, file_id=file_id, region_id=-1, channel=0, stokes=0
         )
@@ -542,7 +535,7 @@ class Session:
         self.queue.put_nowait(message)
 
         # Mark histogram as ready
-        self.hist_events[file_id].set()
+        self.fm.files[file_id].hist_event.set()
 
         return None
 
@@ -772,7 +765,7 @@ class Session:
         tiles = list(tiles)
 
         # Check if histogram is sent
-        await self.hist_events[file_id].wait()
+        await self.fm.files[file_id].hist_event.wait()
         # This is to switch the event loop to send the histogram
         await asyncio.sleep(0)
 
@@ -962,7 +955,7 @@ class Session:
         # Send spectral profile if enabled
         if send_spectral_profile:
             asyncio.create_task(
-                self.send_SpectroProfileData(
+                self.send_SpectralProfileData(
                     request_id=0,
                     file_id=file_id,
                     region_id=0,
@@ -1109,7 +1102,7 @@ class Session:
 
         return None
 
-    async def send_SpectroProfileData(
+    async def send_SpectralProfileData(
         self,
         request_id: int,
         file_id: int,
@@ -1276,7 +1269,7 @@ class Session:
 
         # Send spectral profile
         if self.spec_prof_on:
-            await self.send_SpectroProfileData(
+            await self.send_SpectralProfileData(
                 request_id,
                 file_id,
                 region_id,
@@ -1333,7 +1326,7 @@ class Session:
         if self.spec_prof_on or self.spec_prof_cursor_on:
             # Use create_task to avoid blocking the event loop
             asyncio.create_task(
-                self.send_SpectroProfileData(
+                self.send_SpectralProfileData(
                     request_id=0,
                     file_id=file_id,
                     region_id=region_id,
