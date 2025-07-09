@@ -184,7 +184,7 @@ class FileManager:
         time: int = 0,
     ):
         # Generate names
-        name = f"{file_id}_{channel}_{stokes}_{time}"
+        name = f"{file_id}_{channel}_{stokes}_{time}_1"
         clog.debug(f"Channel cache keys: {list(self.channel_cache.keys())}")
         clog.debug(f"Getting channel for {name}")
 
@@ -196,14 +196,14 @@ class FileManager:
             # This means that the user is viewing another channel/stokes
             # so we can clear the channel cache of previous channel/stokes
             for key in list(self.channel_cache.keys()):
-                if not key.startswith(name):
+                if not key.startswith(name[:-2]):
                     clog.debug(f"Clearing channel cache for {key}")
                     del self.channel_cache[key]
 
         # If the frame size is less than half of the available memory,
         # load the full frame into memory
         frame_size = self.files[file_id].frame_size
-        if frame_size > (self.avail_mem * 0.5):
+        if frame_size > (self.avail_mem * 0.25):
             use_dask = True
         else:
             use_dask = False
