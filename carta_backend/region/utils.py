@@ -19,6 +19,7 @@ class RegionData:
     region_info: CARTA.RegionInfo
     preview_region: bool | None
     profiles: np.ndarray | None
+    token: int | None
 
 
 def get_rectangle(region_info):

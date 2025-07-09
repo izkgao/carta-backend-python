@@ -18,6 +18,7 @@ from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (
     block_reduce_numba,
+    get_axes_dict,
     get_file_type,
     get_fits_dask_channels_chunks,
     get_header_from_xradio,
@@ -49,6 +50,7 @@ class FileData:
     hist_event: asyncio.Event
     spat_req: Dict[str, Dict[str, int | None]]
     cursor_coords: List[int | None]
+    axes_dict: Dict[str, int] | None
 
 
 class FileManager:
@@ -534,6 +536,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
         cursor_coords=[None, None],
+        axes_dict=get_axes_dict(header),
     )
     return filedata
 
@@ -594,6 +597,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
         cursor_coords=[None, None],
+        axes_dict=get_axes_dict(header),
     )
     return filedata
 

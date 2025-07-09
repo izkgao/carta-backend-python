@@ -757,10 +757,6 @@ async def async_load_xradio_data(
 
 
 def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0):
-    if channel is None:
-        channel = slice(channel)
-    if stokes is None:
-        stokes = slice(stokes)
     data = (
         ds["SKY"]
         .isel(frequency=channel, polarization=stokes, time=time)
@@ -1033,11 +1029,11 @@ def get_fits_info(file_path: Union[str, Path], hdu_index: int = 0) -> Tuple:
 
 def read_zarr_slice(
     file_path: Union[str, Path],
-    time: slice | int = slice(None),
-    frequency: slice | int = slice(None),
-    polarization: slice | int = slice(None),
-    ll: slice | int = slice(None),
-    mm: slice | int = slice(None),
+    time: slice | int | None,
+    frequency: slice | int | None,
+    polarization: slice | int | None,
+    ll: slice | int | None,
+    mm: slice | int | None,
     max_workers: int = 2,
 ) -> np.ndarray:
     """
@@ -1050,16 +1046,16 @@ def read_zarr_slice(
     ----------
     file_path : Union[str, Path]
         The path to the Zarr dataset directory.
-    time : slice | int, optional
-        The slice of time to read. Defaults to slice(None).
-    frequency : slice | int, optional
-        The slice of frequency to read. Defaults to slice(None).
-    polarization : slice | int, optional
-        The slice of polarization to read. Defaults to slice(None).
-    ll : slice | int, optional
-        The slice of l to read. Defaults to slice(None).
-    mm : slice | int, optional
-        The slice of m to read. Defaults to slice(None).
+    time : slice | int | None, optional
+        The slice of time to read. Defaults to None (all).
+    frequency : slice | int | None, optional
+        The slice of frequency to read. Defaults to None (all).
+    polarization : slice | int | None, optional
+        The slice of polarization to read. Defaults to None (all).
+    ll : slice | int | None, optional
+        The slice of l to read. Defaults to None (all).
+    mm : slice | int | None, optional
+        The slice of m to read. Defaults to None (all).
     max_workers : int, optional
         The maximum number of workers to use for reading. Defaults to 2.
 
@@ -1068,6 +1064,17 @@ def read_zarr_slice(
     np.ndarray
         The slice of data read from the Zarr file.
     """
+    if time is None:
+        time = slice(None)
+    if frequency is None:
+        frequency = slice(None)
+    if polarization is None:
+        polarization = slice(None)
+    if ll is None:
+        ll = slice(None)
+    if mm is None:
+        mm = slice(None)
+
     file_path = Path(file_path)
     shape, chunk_full_shape, dtype, order, comp_config = get_zarr_info(
         file_path

@@ -13,7 +13,12 @@ from dask.distributed import Client, as_completed
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
-from carta_backend.config.config import ICD_VERSION
+from carta_backend.config.config import (
+    ICD_VERSION,
+    INIT_DELTA_Z,
+    TARGET_PARTIAL_CURSOR_TIME,
+    TARGET_PARTIAL_REGION_TIME,
+)
 from carta_backend.file import (
     FileManager,
     get_directory_info,
@@ -872,7 +877,7 @@ class Session:
                     }
 
             # Check if we should send data
-            x, y = self.fm.files[file_id].cursor_coords
+            x, y, _ = self.fm.files[file_id].cursor_coords
             if to_send and x is not None and y is not None:
                 # Read parameters needed for sending within the lock
                 sprx = self.fm.files[file_id].spat_req["x"]
@@ -926,7 +931,8 @@ class Session:
         send_spectral_profile = False
 
         async with self.lock:
-            self.fm.files[file_id].cursor_coords = [x, y]
+            cursor_token = perf_counter_ns()
+            self.fm.files[file_id].cursor_coords = [x, y, cursor_token]
             sprx = self.fm.files[file_id].spat_req["x"]
             spry = self.fm.files[file_id].spat_req["y"]
             channel, stokes = self.channel_stokes
@@ -954,16 +960,14 @@ class Session:
 
         # Send spectral profile if enabled
         if send_spectral_profile:
-            asyncio.create_task(
-                self.send_SpectralProfileData(
-                    request_id=0,
-                    file_id=file_id,
-                    region_id=0,
-                    x=x,
-                    y=y,
-                    stats_type=2,
-                    task_token=params_for_sending["task_token"],
-                )
+            await self.send_SpectralProfileData(
+                request_id=0,
+                file_id=file_id,
+                region_id=0,
+                x=x,
+                y=y,
+                stats_type=2,
+                cursor_token=cursor_token,
             )
 
         return None
@@ -1111,7 +1115,7 @@ class Session:
         x: int | None = None,
         y: int | None = None,
         stats_type: int = 2,
-        task_token: str = None,
+        cursor_token: int | None = None,
     ) -> None:
         t0 = perf_counter_ns()
 
@@ -1120,41 +1124,35 @@ class Session:
         sp.coordinate = "z"
         sp.stats_type = stats_type
 
-        # Set is_point to True
-        # if region_id is 0 (cursor) or region is point
         if region_id == 0:
+            # Cursor
             is_point = True
+            token = cursor_token
         elif (
             region_info is not None
             and region_info.region_type == CARTA.RegionType.POINT
         ):
+            # Point region
             points = region_info.control_points
             x, y = round(points[0].x), round(points[0].y)
             is_point = True
+            token = self.region_dict[region_id].token
         else:
+            # Other regions
             is_point = False
+            token = None
 
         if is_point:
-            # Cursor/point spectral profile
-            spec_profile = self.fm.get_point_spectrum(
-                file_id=file_id, x=x, y=y, channel=None, stokes=0, time=0
+            await self.send_SpectralProfileData_point(
+                request_id,
+                file_id,
+                region_id,
+                x,
+                y,
+                stats_type,
+                token=token,
             )
-
-            # Compute the task
-            if isinstance(spec_profile, da.Array):
-                spec_profile = await self.compute_cursor_spectral_profile(
-                    spec_profile, file_id, task_token
-                )
-
-            if spec_profile is None:
-                return None
-
-            if region_id == 0:
-                sp.raw_values_fp32 = spec_profile.astype("float32").tobytes()
-                msg_add = " cursor"
-            else:
-                sp.raw_values_fp64 = spec_profile.astype("float64").tobytes()
-                msg_add = ""
+            return None
         else:
             # Region spectral profile
             if self.region_dict[region_id].profiles is None:
@@ -1188,49 +1186,127 @@ class Session:
 
         return None
 
-    async def compute_cursor_spectral_profile(
+    async def send_SpectralProfileData_point(
         self,
-        spec_profile: da.Array,
+        request_id: int,
         file_id: int,
-        task_token: str,
-    ):
-        # Compute the task and get future
-        future = self.client.compute(spec_profile)
+        region_id: int,
+        x: int | None = None,
+        y: int | None = None,
+        stats_type: int = 2,
+        token: int | None = None,
+    ) -> None:
+        t0 = perf_counter_ns()
 
-        # Check if still current task
-        async with self.lock:
-            current_token = self.cursor_task_tokens.get(file_id)
-        if task_token is not None and current_token != task_token:
-            # This task is no longer the current task
-            # Cancel future and abort
-            msg = "Cancelling obsolete spectral profile "
-            msg += f"calculation for {file_id}"
-            pflog.debug(msg)
-            future.cancel()
+        # Initilize spectral profile
+        axes_dict = self.fm.files[file_id].axes_dict
+        if "FREQ" not in axes_dict:
             return None
+        freq_axis = -axes_dict["FREQ"] - 1
+        channel_size = self.fm.files[file_id].data.shape[freq_axis]
+        spec_profile = np.full(channel_size, np.nan, dtype=np.float32)
 
-        try:
-            # Await result (may raise if cancelled)
-            spec_profile = await future
+        # Create spectral profile object
+        sp = CARTA.SpectralProfile()
+        sp.coordinate = "z"
+        sp.stats_type = stats_type
 
-            # Check again after computation
-            async with self.lock:
-                current_token = self.cursor_task_tokens.get(file_id)
-            if task_token is not None and current_token != task_token:
-                # This task is no longer the current task
-                # Cancel future and abort
-                msg = "Discarding obsolete spectral profile "
-                msg += f"results for {file_id}"
-                pflog.debug(msg)
-                return None
-        except Exception as e:
-            # Handle cancellation or other exceptions
-            msg = "Dask computation for spectral profile failed: "
-            msg += str(e)
-            pflog.error(msg)
-            return None
+        # Create response object
+        resp = CARTA.SpectralProfileData()
+        resp.file_id = file_id
+        resp.region_id = region_id
+        resp.stokes = 0  # Not implemented
 
-        return spec_profile
+        # Set progress parameters
+        current_channel = 0
+        progress = 0.0
+        delta_z = INIT_DELTA_Z
+
+        if region_id == 0:
+            dt_partial_update = TARGET_PARTIAL_CURSOR_TIME
+        else:
+            dt_partial_update = TARGET_PARTIAL_REGION_TIME
+
+        while progress < 1.0:
+            # Check if cursor/region changed
+            if token is not None:
+                if region_id == 0:
+                    current_token = self.fm.files[file_id].cursor_coords[2]
+                else:
+                    current_token = self.region_dict[region_id].token
+                if token != current_token:
+                    msg = "Discarding obsolete point spectral profile "
+                    pflog.debug(msg)
+                    return None
+
+            t_start_slice = perf_counter_ns()
+
+            delta_z = min(delta_z, channel_size - current_channel)
+            channel_slice = slice(current_channel, current_channel + delta_z)
+
+            part_spec_prof = await asyncio.to_thread(
+                self.fm.get_point_spectrum,
+                file_id=file_id,
+                x=x,
+                y=y,
+                channel=channel_slice,
+                stokes=0,
+                time=0,
+            )
+            spec_profile[channel_slice] = part_spec_prof
+
+            current_channel += delta_z
+            progress = current_channel / channel_size
+
+            t_end_slice = perf_counter_ns()
+
+            # Adjust delta_z based on time taken
+            time_taken_ms = (t_end_slice - t_start_slice) / 1e6
+            adjustment_factor = dt_partial_update / time_taken_ms
+            delta_z = int(
+                max(1, min(delta_z * adjustment_factor, channel_size))
+            )
+
+            if region_id == 0:
+                sp.raw_values_fp32 = spec_profile.tobytes()
+            else:
+                sp.raw_values_fp64 = spec_profile.astype(
+                    np.float64, copy=False
+                ).tobytes()
+
+            resp.progress = progress
+            if len(resp.profiles) > 0:
+                resp.profiles.pop()
+            resp.profiles.append(sp)
+
+            # Encode message
+            event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
+            message = self.encode_message(event_type, request_id, resp)
+
+            # Check if cursor/region changed
+            await asyncio.sleep(0)
+            if token is not None:
+                if region_id == 0:
+                    current_token = self.fm.files[file_id].cursor_coords[2]
+                else:
+                    current_token = self.region_dict[region_id].token
+                if token != current_token:
+                    msg = "Discarding obsolete point spectral profile "
+                    pflog.debug(msg)
+                    return None
+
+            # Send message
+            self.queue.put_nowait(message)
+            await asyncio.sleep(0)
+
+        if region_id == 0:
+            msg_add = " cursor"
+        else:
+            msg_add = ""
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
+        pflog.debug(msg)
 
     async def do_SetRegion(self, message: bytes) -> None:
         # Decode message
@@ -1254,10 +1330,12 @@ class Session:
                     region_info=region_info,
                     preview_region=preview_region,
                     profiles=None,
+                    token=perf_counter_ns(),
                 )
             else:
                 self.region_dict[region_id].region_info = region_info
                 self.region_dict[region_id].profiles = None
+                self.region_dict[region_id].token = perf_counter_ns()
 
         # Send message
         resp = CARTA.SetRegionAck()
@@ -1313,7 +1391,7 @@ class Session:
                 # Cursor
                 region_info = None
                 # stats_type = 2  # Sum
-                x, y = self.fm.files[file_id].cursor_coords
+                x, y, _ = self.fm.files[file_id].cursor_coords
                 if x is None or y is None:
                     return None
             else:
@@ -1497,6 +1575,7 @@ class Session:
                     region_info=region_info,
                     preview_region=None,
                     profiles=None,
+                    token=perf_counter_ns(),
                 )
                 resp.regions[max_id].CopyFrom(region_info)
                 resp.region_styles[max_id].CopyFrom(region_style)
