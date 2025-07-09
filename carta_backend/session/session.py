@@ -1199,11 +1199,9 @@ class Session:
         t0 = perf_counter_ns()
 
         # Initilize spectral profile
-        axes_dict = self.fm.files[file_id].axes_dict
-        if "FREQ" not in axes_dict:
+        channel_size = self.fm.files[file_id].sizes["frequency"]
+        if channel_size is None:
             return None
-        freq_axis = -axes_dict["FREQ"] - 1
-        channel_size = self.fm.files[file_id].data.shape[freq_axis]
         spec_profile = np.full(channel_size, np.nan, dtype=np.float32)
 
         # Create spectral profile object

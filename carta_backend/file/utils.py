@@ -757,6 +757,10 @@ async def async_load_xradio_data(
 
 
 def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0):
+    if channel is None:
+        channel = slice(channel)
+    if stokes is None:
+        stokes = slice(stokes)
     data = (
         ds["SKY"]
         .isel(frequency=channel, polarization=stokes, time=time)
@@ -1029,11 +1033,11 @@ def get_fits_info(file_path: Union[str, Path], hdu_index: int = 0) -> Tuple:
 
 def read_zarr_slice(
     file_path: Union[str, Path],
-    time: slice | int | None,
-    frequency: slice | int | None,
-    polarization: slice | int | None,
-    ll: slice | int | None,
-    mm: slice | int | None,
+    time: slice | int | None = None,
+    frequency: slice | int | None = None,
+    polarization: slice | int | None = None,
+    ll: slice | int | None = None,
+    mm: slice | int | None = None,
     max_workers: int = 2,
 ) -> np.ndarray:
     """

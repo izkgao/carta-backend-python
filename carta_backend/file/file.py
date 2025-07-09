@@ -45,6 +45,7 @@ class FileData:
     file_type: int
     hdu_index: int
     img_shape: Tuple[int, int]
+    sizes: Dict[str, int]
     data_size: float  # Unit: MiB
     frame_size: float  # Unit: MiB
     hist_event: asyncio.Event
@@ -470,6 +471,20 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         warnings.simplefilter("ignore", FITSFixedWarning)
         wcs = WCS(header)
 
+    # Get sizes
+    axes_dict = get_axes_dict(header)
+    sizes = {
+        "l": shape[-axes_dict["RA"] - 1],
+        "m": shape[-axes_dict["DEC"] - 1],
+        "frequency": shape[-axes_dict["FREQ"] - 1]
+        if "FREQ" in axes_dict
+        else None,
+        "stokes": shape[-axes_dict["STOKES"] - 1]
+        if "STOKES" in axes_dict
+        else None,
+        "time": shape[-axes_dict["TIME"] - 1] if "TIME" in axes_dict else None,
+    }
+
     # Create dask array
     t0 = perf_counter_ns()
     data = mmap_dask_array(
@@ -527,6 +542,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         file_type=CARTA.FileType.FITS,
         hdu_index=hdu_index,
         img_shape=img_shape,
+        sizes=sizes,
         memmap=memmap,
         hist_event=asyncio.Event(),
         data_size=data_size,
@@ -548,6 +564,15 @@ async def get_zarr_FileData(file_id, file_path, client=None):
     # Get header
     header = await get_header_from_xradio(data, client)
     img_shape = [data.sizes["m"], data.sizes["l"]]
+
+    # Get sizes
+    sizes = {
+        "l": data.sizes["l"],
+        "m": data.sizes["m"],
+        "frequency": data.sizes.get("frequency", None),
+        "stokes": data.sizes.get("polarization", None),
+        "time": data.sizes.get("time", None),
+    }
 
     # Log file information in separate parts to avoid
     # formatting conflicts
@@ -589,6 +614,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         file_type=CARTA.FileType.CASA,
         hdu_index=None,
         img_shape=img_shape,
+        sizes=sizes,
         hist_event=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
