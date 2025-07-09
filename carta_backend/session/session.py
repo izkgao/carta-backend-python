@@ -654,6 +654,7 @@ class Session:
                         y=y,
                         layer=layer,
                     )
+                    await asyncio.sleep(0)
 
         dt = (perf_counter_ns() - t0) / 1e6
 
