@@ -171,7 +171,7 @@ class Server:
             message = await self.session.queue.get()
             if message is None:
                 break
-            asyncio.create_task(self._send_message(websocket, message))
+            await self._send_message(websocket, message)
 
     async def _send_message(self, websocket: WebSocket, message: bytes):
         await websocket.send_bytes(message)
