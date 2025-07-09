@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Tuple
+from typing import Dict, List, Tuple
 
 import dask.array as da
 import numpy as np
@@ -44,9 +44,11 @@ class FileData:
     file_type: int
     hdu_index: int
     img_shape: Tuple[int, int]
-    hist_on: bool | asyncio.Event
     data_size: float  # Unit: MiB
     frame_size: float  # Unit: MiB
+    hist_on: bool | asyncio.Event
+    spat_req: Dict[str, Dict[str, int | None]]
+    cursor_coords: List[int | None]
 
 
 class FileManager:
@@ -276,6 +278,14 @@ class FileManager:
                 tile_shape=TILE_SHAPE,
             )
 
+        if mip <= 1:
+            return self.get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+
         # Generate names
         name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
         clog.debug(f"Cache keys: {list(self.channel_cache.keys())}")
@@ -495,6 +505,11 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         hist_on=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
+        spat_req={
+            "x": {"start": 0, "end": None, "mip": 1, "width": 0},
+            "y": {"start": 0, "end": None, "mip": 1, "width": 0},
+        },
+        cursor_coords=[None, None],
     )
     return filedata
 
@@ -550,6 +565,11 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         hist_on=False,
         data_size=data_size,
         frame_size=frame_size,
+        spat_req={
+            "x": {"start": 0, "end": None, "mip": 1, "width": 0},
+            "y": {"start": 0, "end": None, "mip": 1, "width": 0},
+        },
+        cursor_coords=[None, None],
     )
     return filedata
 
