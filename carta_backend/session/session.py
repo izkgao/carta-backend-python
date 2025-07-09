@@ -840,81 +840,92 @@ class Session:
 
     async def do_SetSpatialRequirements(self, message: bytes) -> None:
         # Decode message
-        event_type, request_id, obj = self.decode_message(message)
+        _, _, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
         region_id = obj.region_id
         spatial_profiles = obj.spatial_profiles
 
-        # Not implemented
+        # Not implemented for regions yet
         if region_id > 0:
             return None
 
-        # Record spatial profiles
-        if file_id not in self.spat_dict:
-            async with self.lock:
-                # [start, end, mip, width]
+        to_send = False
+        params_for_sending = {}
+
+        async with self.lock:
+            # Initialize spatial profiles dict for file_id if not present
+            if file_id not in self.spat_dict:
                 self.spat_dict[file_id] = {
-                    "x": [0, None, 1, 0],
+                    "x": [0, None, 1, 0],  # [start, end, mip, width]
                     "y": [0, None, 1, 0],
                 }
 
-        to_send = False
-
-        async with self.lock:
+            # Process spatial profiles and update dict
             for p in spatial_profiles:
                 start = int(p.start)
                 end = int(p.end)
                 mip = int(p.mip)
                 width = p.width
 
-                if (start == 0) and (end == 0):
+                if start == 0 and end == 0:
                     if mip != 0:
                         to_send = True
                         self.spat_dict[file_id][p.coordinate][2] = mip
-                    if width == 0:
-                        continue
-                    else:
+                    if width != 0:
                         to_send = True
                         self.spat_dict[file_id][p.coordinate][3] = width
                 else:
                     ox, oy, om = self.spat_dict[file_id][p.coordinate][:3]
-                    if (start == ox) and (end == oy) and (mip == om):
-                        continue
-                    to_send = True
-                    content = [start, end, mip, width]
-                    self.spat_dict[file_id][p.coordinate] = content
+                    if not (start == ox and end == oy and mip == om):
+                        to_send = True
+                        self.spat_dict[file_id][p.coordinate] = [
+                            start,
+                            end,
+                            mip,
+                            width,
+                        ]
 
-            if file_id not in self.cursor_dict:
-                to_send = False
-
-            if to_send:
-                # Read parameters
+            # Check if we should send data
+            if to_send and file_id in self.cursor_dict:
+                # Read parameters needed for sending within the lock
                 x, y = self.cursor_dict[file_id]
                 sprx = self.spat_dict[file_id]["x"]
                 spry = self.spat_dict[file_id]["y"]
                 channel, stokes = self.channel_stokes
+                params_for_sending = {
+                    "x": x,
+                    "y": y,
+                    "sprx": sprx,
+                    "spry": spry,
+                    "channel": channel,
+                    "stokes": stokes,
+                }
+            else:
+                to_send = False
 
         if to_send:
-            # Send spatial profile data
+            # Send spatial profile data outside the lock
+            sprx = params_for_sending["sprx"]
+            spry = params_for_sending["spry"]
             await self.send_SpatialProfileData(
                 request_id=0,
                 file_id=file_id,
                 slice_x=slice(sprx[0], sprx[1]),
                 slice_y=slice(spry[0], spry[1]),
                 mip=sprx[2],
-                x=x,
-                y=y,
-                channel=channel,
-                stokes=stokes,
+                x=params_for_sending["x"],
+                y=params_for_sending["y"],
+                channel=params_for_sending["channel"],
+                stokes=params_for_sending["stokes"],
             )
 
         return None
 
     async def do_SetCursor(self, message: bytes) -> None:
         # Decode message
-        event_type, request_id, obj = self.decode_message(message)
+        _, _, obj = self.decode_message(message)
 
         # Extract parameters
         file_id = obj.file_id
@@ -924,10 +935,12 @@ class Session:
         # Check boundary
         shape = self.fm.files[file_id].img_shape
         x, y = int(point.x), int(point.y)
-        if x < 0 or x >= shape[1] or y < 0 or y >= shape[0]:
-            return None
+        if not (0 <= x < shape[1] and 0 <= y < shape[0]):
+            return
 
-        # Record cursor and read other parameters
+        params_for_sending = {}
+        send_spectral_profile = False
+
         async with self.lock:
             if file_id not in self.spat_dict:
                 # Return None if spatial requirement has not been set
@@ -936,28 +949,30 @@ class Session:
             sprx = self.spat_dict[file_id]["x"]
             spry = self.spat_dict[file_id]["y"]
             channel, stokes = self.channel_stokes
-            mip = sprx[2]
-
-            # Generate a new cursor task token to identify this request
             task_token = f"{file_id}_{x}_{y}_{perf_counter_ns()}"
             self.cursor_task_tokens[file_id] = task_token
+
+            params_for_sending = {
+                "slice_x": slice(sprx[0], sprx[1]),
+                "slice_y": slice(spry[0], spry[1]),
+                "mip": sprx[2],
+                "channel": channel,
+                "stokes": stokes,
+                "task_token": task_token,
+            }
+            send_spectral_profile = self.spec_prof_cursor_on
 
         # Send spatial profile data
         await self.send_SpatialProfileData(
             request_id=0,
             file_id=file_id,
-            slice_x=slice(sprx[0], sprx[1]),
-            slice_y=slice(spry[0], spry[1]),
-            mip=mip,
             x=x,
             y=y,
-            channel=channel,
-            stokes=stokes,
-            task_token=task_token,
+            **params_for_sending,
         )
 
-        # Send spectral profile
-        if self.spec_prof_cursor_on:
+        # Send spectral profile if enabled
+        if send_spectral_profile:
             asyncio.create_task(
                 self.send_SpectroProfileData(
                     request_id=0,
@@ -966,7 +981,7 @@ class Session:
                     x=x,
                     y=y,
                     stats_type=2,
-                    task_token=task_token,
+                    task_token=params_for_sending["task_token"],
                 )
             )
 
@@ -990,7 +1005,8 @@ class Session:
 
         # Get data
         shape = self.fm.files[file_id].img_shape
-        data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
+        # data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
+        data = self.fm.get_channel_mip(file_id, channel, stokes, mip=mip)
 
         if mip > 1:
             mx = x // mip
@@ -1008,7 +1024,7 @@ class Session:
             slice_y = slice(None, None)
 
         # Check if x and y are valid and inside data
-        if my < 0 or my >= data.shape[0] or mx < 0 or mx >= data.shape[1]:
+        if not (0 <= mx < data.shape[1] and 0 <= my < data.shape[0]):
             return None
 
         if isinstance(data, da.Array):
@@ -1060,8 +1076,8 @@ class Session:
             y_profile = y_profile.tobytes()
         else:
             value = float(data[my, mx])
-            x_profile = data[my, slice_x].astype("<f4").tobytes()
-            y_profile = data[slice_y, mx].astype("<f4").tobytes()
+            x_profile = data[my, slice_x].tobytes()
+            y_profile = data[slice_y, mx].tobytes()
 
         resp = CARTA.SpatialProfileData()
         resp.file_id = file_id
