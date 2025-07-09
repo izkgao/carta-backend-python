@@ -185,8 +185,8 @@ class FileManager:
     ):
         # Generate names
         name = f"{file_id}_{channel}_{stokes}_{time}"
-        clog.debug(f"Getting channel for {name}")
         clog.debug(f"Channel cache keys: {list(self.channel_cache.keys())}")
+        clog.debug(f"Getting channel for {name}")
 
         # Check cache
         if name in list(self.channel_cache.keys()):
@@ -196,7 +196,7 @@ class FileManager:
             # This means that the user is viewing another channel/stokes
             # so we can clear the channel cache of previous channel/stokes
             for key in list(self.channel_cache.keys()):
-                if not key.startswith(name) and channel is not None:
+                if not key.startswith(name):
                     clog.debug(f"Clearing channel cache for {key}")
                     del self.channel_cache[key]
 
@@ -246,16 +246,67 @@ class FileManager:
                     max_workers=2,
                 )
 
+        # Convert to float32 to avoid using dtype >f4
+        t0 = perf_counter_ns()
+        data = data.astype(np.float32, copy=False)
+
         if isinstance(data, np.ndarray):
-            # Convert to float32 to avoid using dtype >f4
-            t0 = perf_counter_ns()
-            data = data.astype(np.float32, copy=False)
             dt = (perf_counter_ns() - t0) / 1e6
             msg = f"Converted to float32 in {dt:.3f} ms"
             clog.debug(msg)
-            # Cache data
-            self.channel_cache[name] = data
 
+        # Cache data (including dask array)
+        self.channel_cache[name] = data
+        return data
+
+    def get_channel_mip(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        layer: int | None = None,
+        mip: int = 1,
+    ):
+        # Convert layer to mip
+        if layer is not None:
+            mip = layer_to_mip(
+                layer,
+                image_shape=self.files[file_id].img_shape,
+                tile_shape=TILE_SHAPE,
+            )
+
+        # Generate names
+        name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+        clog.debug(f"Cache keys: {list(self.channel_cache.keys())}")
+        clog.debug(f"Getting channel mip for {name}")
+
+        # Check cache
+        if name in list(self.channel_cache.keys()):
+            clog.debug(f"Using cached data for {name}")
+            return self.channel_cache[name]
+        else:
+            data = self.get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+
+        # Downsample data
+        if mip > 1:
+            if isinstance(data, da.Array):
+                data = da.coarsen(
+                    da.nanmean,
+                    data,
+                    {0: mip, 1: mip},
+                    trim_excess=True,
+                )
+            else:
+                data = block_reduce_numba(data, mip)
+
+        # Cache data (including dask array)
+        self.channel_cache[name] = data
         return data
 
     def get_all_tiles(
