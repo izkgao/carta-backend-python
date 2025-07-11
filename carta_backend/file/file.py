@@ -24,6 +24,7 @@ from carta_backend.file.utils import (
     get_header_from_xradio,
     load_data,
     mmap_dask_array,
+    read_zarr_channel,
     read_zarr_slice,
 )
 from carta_backend.log import logger
@@ -243,7 +244,7 @@ class FileManager:
                 )
             elif file_type == CARTA.FileType.CASA:
                 file_path = self.files[file_id].file_path
-                data = read_zarr_slice(
+                data = read_zarr_channel(
                     file_path=file_path,
                     time=time,
                     frequency=channel,

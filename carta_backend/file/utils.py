@@ -1135,6 +1135,93 @@ def read_zarr_slice(
     return np.squeeze(np.swapaxes(result, 3, 4))
 
 
+def read_zarr_channel(
+    file_path: Union[str, Path],
+    frequency: int,
+    polarization: int,
+    time: int = 0,
+    max_workers: int = 2,
+) -> np.ndarray:
+    """
+    Read a channel from a Zarr file.
+
+    This function reads a channel from a Zarr file, taking into account
+    the chunking and compression of the data.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+    frequency : int
+        The frequency index to read.
+    polarization : int
+        The polarization index to read.
+    time : int, optional
+        The time index to read. Defaults to 0.
+    max_workers : int, optional
+        The maximum number of workers to use for reading. Defaults to 2.
+
+    Returns
+    -------
+    np.ndarray
+        The channel read from the Zarr file.
+    """
+
+    ll = slice(None)
+    mm = slice(None)
+
+    file_path = Path(file_path)
+    shape, chunk_full_shape, dtype, order, comp_config = get_zarr_info(
+        file_path
+    )
+
+    if comp_config is not None:
+        compressor = get_codec(comp_config)
+    else:
+        return read_zarr_slice(
+            file_path,
+            time=time,
+            frequency=frequency,
+            polarization=polarization,
+            ll=ll,
+            mm=mm,
+        )
+
+    slices = (time, frequency, polarization, ll, mm)
+    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
+
+    result = np.empty(output_shape[-2:], dtype=dtype)
+
+    def decomp_read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+
+        layer_shape = chunk_full_shape[-2:]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        start = np.ravel_multi_index(
+            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape
+        )
+        nitems = np.prod(layer_shape)
+
+        with open(chunk_filename, "rb") as f:
+            compressed = f.read()
+            decompressed = compressor.decode_partial(compressed, start, nitems)
+
+        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
+            layer_shape, order=order
+        )
+        data_piece = chunk_data[tuple(i for i in chunk_slice[-2:])]
+        result[tuple(i for i in global_slice[-2:])] = data_piece
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        _ = list(executor.map(decomp_read_and_insert, plans))
+
+    return np.swapaxes(result, 0, 1)
+
+
 @delayed
 def mmap_load_chunk(filename, shape, dtype, offset, sl):
     """
