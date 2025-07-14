@@ -680,6 +680,7 @@ def load_fits_data(
     y=None,
     channel=None,
     stokes=None,
+    dtype=None,
 ) -> Union[np.ndarray, da.Array]:
     """
     Load data from a FITS array with proper slicing based on WCS coordinates.
@@ -698,6 +699,10 @@ def load_fits_data(
         Channel index or slice to select. If None, all channels are selected.
     stokes : int, slice, or None
         Stokes index or slice to select. If None, all stokes are selected.
+    dtype : np.dtype | None
+        The data type to convert the result to. If None, the original data
+        type is used.
+
 
     Returns
     -------
@@ -742,6 +747,9 @@ def load_fits_data(
 
     if isinstance(result, np.memmap):
         result = np.asarray(result)
+
+    if dtype is not None:
+        result = result.astype(dtype, copy=False)
     return result
 
 
@@ -758,7 +766,9 @@ async def async_load_xradio_data(
     return data.data
 
 
-def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0):
+def load_xradio_data(
+    ds, x=None, y=None, channel=None, stokes=None, time=0, dtype=None
+):
     if channel is None:
         channel = slice(channel)
     if stokes is None:
@@ -772,18 +782,47 @@ def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0):
         data = data.isel(l=x)
     if y is not None:
         data = data.isel(m=y)
-    return data.data
+
+    # Get dask array from xarray Dataset
+    data = data.data
+
+    if dtype is not None:
+        data = data.astype(dtype, copy=False)
+    return data
 
 
 def load_data(
-    data, x=None, y=None, channel=None, stokes=None, time=0, wcs=None
+    data,
+    x=None,
+    y=None,
+    channel=None,
+    stokes=None,
+    time=0,
+    wcs=None,
+    dtype=None,
 ) -> Optional[da.Array]:
     # Dask array from FITS
     if isinstance(data, (da.Array, np.ndarray, np.memmap)):
-        return load_fits_data(data, wcs, x, y, channel, stokes)
+        return load_fits_data(
+            data=data,
+            wcs=wcs,
+            x=x,
+            y=y,
+            channel=channel,
+            stokes=stokes,
+            dtype=dtype,
+        )
     # Xarray Dataset from Xradio
     elif isinstance(data, Dataset):
-        return load_xradio_data(data, x, y, channel, stokes, time)
+        return load_xradio_data(
+            ds=data,
+            x=x,
+            y=y,
+            channel=channel,
+            stokes=stokes,
+            time=time,
+            dtype=dtype,
+        )
     else:
         clog.error(f"Unsupported data type: {type(data)}")
         return None
@@ -1179,6 +1218,9 @@ async def async_read_zarr_slice(
     polarization: slice | int | None = None,
     ll: slice | int | None = None,
     mm: slice | int | None = None,
+    dtype: np.dtype | None = None,
+    semaphore: asyncio.Semaphore | None = None,
+    max_workers: int = 4,
 ) -> np.ndarray:
     """
     Read a slice of data from a Zarr file.
@@ -1200,6 +1242,14 @@ async def async_read_zarr_slice(
         The slice of l to read. Defaults to None (all).
     mm : slice | int | None, optional
         The slice of m to read. Defaults to None (all).
+    dtype : np.dtype | None, optional
+        The data type to convert the result to. If None, the original data
+        type is used.
+    semaphore : asyncio.Semaphore | None, optional
+        The semaphore to use for limiting the number of concurrent
+        read operations. If None, ``asyncio.Semaphore(max_workers)`` is used.
+    max_workers : int, optional
+        The maximum number of semaphores to use for reading. Defaults to 4.
 
     Returns
     -------
@@ -1216,6 +1266,7 @@ async def async_read_zarr_slice(
         ll = slice(None)
     if mm is None:
         mm = slice(None)
+    output_dtype = dtype
 
     file_path = Path(file_path)
     (
@@ -1230,6 +1281,9 @@ async def async_read_zarr_slice(
 
     if comp_config is not None:
         compressor = get_codec(comp_config)
+
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(max_workers)
 
     result = np.empty(output_shape, dtype=dtype)
 
@@ -1251,7 +1305,13 @@ async def async_read_zarr_slice(
             data_piece = chunk_data[chunk_slice]
             return data_piece
 
-        result[global_slice] = await asyncio.to_thread(read_chunk)
+        async def read_chunk_with_semaphore(plan):
+            async with semaphore:
+                return await read_chunk(plan)
+
+        result[global_slice] = await asyncio.to_thread(
+            read_chunk_with_semaphore, plan
+        )
 
     async def decomp_read_and_insert(plan):
         chunk_id = plan["chunk_id"]
@@ -1260,11 +1320,11 @@ async def async_read_zarr_slice(
 
         chunk_filename = file_path / "SKY" / chunk_id
 
-        async with aiofiles.open(chunk_filename, "rb") as f:
-            compressed = await f.read()
-            decompressed = await asyncio.to_thread(
-                compressor.decode, compressed
-            )
+        async with semaphore:
+            async with aiofiles.open(chunk_filename, "rb") as f:
+                compressed = await f.read()
+
+        decompressed = await asyncio.to_thread(compressor.decode, compressed)
 
         chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
             chunk_full_shape, order=order
@@ -1279,7 +1339,11 @@ async def async_read_zarr_slice(
 
     await asyncio.gather(*[func(plan) for plan in plans])
 
-    return np.squeeze(np.swapaxes(result, 3, 4))
+    result = np.squeeze(np.swapaxes(result, 3, 4))
+
+    if output_dtype is not None:
+        result = result.astype(output_dtype, copy=False)
+    return result
 
 
 def read_zarr_channel(

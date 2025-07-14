@@ -40,7 +40,7 @@ ptlog = logger.bind(name="Protocol")
 @dataclass
 class FileData:
     file_path: Path
-    data: np.ndarray | da.Array | Dataset
+    data: da.Array | Dataset
     memmap: np.ndarray | Dataset | None
     memmap_info: Dict[str, Any] | None
     dask_channels: da.Array | None
@@ -217,8 +217,6 @@ class FileManager:
         else:
             use_dask = False
 
-        use_dask = True
-
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
@@ -321,8 +319,10 @@ class FileManager:
             )
         else:
             if file_type == CARTA.FileType.FITS:
-                _data = self.files[file_id].memmap
-                data = load_data(
+                memmap_info = self.files[file_id].memmap_info
+                _data = np.memmap(**memmap_info)
+                data = await asyncio.to_thread(
+                    load_data,
                     data=_data,
                     x=None,
                     y=None,
@@ -342,12 +342,15 @@ class FileManager:
 
         # Convert to float32 to avoid using dtype >f4
         t0 = perf_counter_ns()
-        data = data.astype(np.float32, copy=False)
 
         if isinstance(data, np.ndarray):
-            dt = (perf_counter_ns() - t0) / 1e6
-            msg = f"Converted to float32 in {dt:.3f} ms"
-            clog.debug(msg)
+            if data.dtype != np.float32:
+                data = data.astype(np.float32, copy=False)
+                dt = (perf_counter_ns() - t0) / 1e6
+                msg = f"Converted to float32 in {dt:.3f} ms"
+                clog.debug(msg)
+        else:
+            data = data.astype(np.float32, copy=False)
 
         # Cache data (including dask array)
         self.channel_cache[name] = data
@@ -573,25 +576,75 @@ class FileManager:
         file_id: str,
         x: int,
         y: int,
-        channel: int | slice | None,
+        channel: slice | None,
         stokes: int,
         time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        use_dask: bool = False,
     ):
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
+        channel_size = self.files[file_id].sizes["frequency"]
 
-        if file_type == CARTA.FileType.FITS:
-            _data = self.files[file_id].memmap
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(max_workers)
+
+        if use_dask:
+            clog.debug("Using Dask to load point spectrum")
             data = load_data(
-                data=_data,
+                data=self.files[file_id].data,
                 x=x,
                 y=y,
                 channel=channel,
                 stokes=stokes,
                 time=time,
+                dtype=dtype,
                 wcs=wcs,
             )
+            data = await self.client.compute(data)
+            return data
+
+        if file_type == CARTA.FileType.FITS:
+            if memmap is None:
+                memmap_info = self.files[file_id].memmap_info
+                memmap = np.memmap(**memmap_info)
+
+            if channel is None:
+                channel = slice(0, channel_size)
+            if channel.start is None:
+                start = 0
+            else:
+                start = channel.start
+            if channel.stop is None:
+                stop = channel_size
+            else:
+                stop = channel.stop
+            channel_size = stop - start
+
+            async def load_chunk(i):
+                ichannel = slice(
+                    start + i * channel_size // max_workers,
+                    start + (i + 1) * channel_size // max_workers,
+                )
+                async with semaphore:
+                    return await asyncio.to_thread(
+                        load_data,
+                        data=memmap,
+                        x=x,
+                        y=y,
+                        channel=ichannel,
+                        stokes=stokes,
+                        wcs=wcs,
+                        dtype=dtype,
+                    )
+
+            tasks = [load_chunk(i) for i in range(max_workers)]
+            results = await asyncio.gather(*tasks)
+            data = np.concatenate(results, axis=0)
         elif file_type == CARTA.FileType.CASA:
             file_path = self.files[file_id].file_path
             data = await async_read_zarr_slice(
@@ -601,8 +654,9 @@ class FileManager:
                 polarization=stokes,
                 ll=x,
                 mm=y,
+                dtype=dtype,
+                semaphore=semaphore,
             )
-
         return data
 
     def close(self, file_id):
@@ -714,7 +768,6 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         shape=shape,
         dtype=dtype,
         offset=offset,
-        order="F",
     )
 
     memmap_info = {
@@ -723,7 +776,6 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         "mode": "r",
         "shape": shape,
         "offset": offset,
-        "order": "F",
     }
 
     # Create FileData

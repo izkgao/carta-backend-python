@@ -90,6 +90,9 @@ class Session:
         # Set up message queue
         self.queue = asyncio.Queue()
 
+        # Set semaphore for reading data
+        self.semaphore = asyncio.Semaphore(4)
+
         # FileList
         self.flag_stop_file_list = False
 
@@ -1140,12 +1143,12 @@ class Session:
 
         if is_point:
             await self.send_SpectralProfileData_point(
-                request_id,
-                file_id,
-                region_id,
-                x,
-                y,
-                stats_type,
+                request_id=request_id,
+                file_id=file_id,
+                region_id=region_id,
+                x=x,
+                y=y,
+                stats_type=stats_type,
                 token=token,
             )
             return None
@@ -1189,16 +1192,26 @@ class Session:
         region_id: int,
         x: int | None = None,
         y: int | None = None,
+        stokes: int = 0,
+        time: int = 0,
         stats_type: int = 2,
         token: int | None = None,
     ) -> None:
         t0 = perf_counter_ns()
 
         # Initilize spectral profile
+        dtype = np.float32 if region_id == 0 else np.float64
         channel_size = self.fm.files[file_id].sizes["frequency"]
         if channel_size is None:
             return None
-        spec_profile = np.full(channel_size, np.nan, dtype=np.float32)
+        spec_profile = np.full(channel_size, np.nan, dtype=dtype)
+
+        # Get memmap
+        memmap_info = self.fm.files[file_id].memmap_info
+        if memmap_info is None:
+            memmap = None
+        else:
+            memmap = np.memmap(**memmap_info)
 
         # Create spectral profile object
         sp = CARTA.SpectralProfile()
@@ -1209,7 +1222,74 @@ class Session:
         resp = CARTA.SpectralProfileData()
         resp.file_id = file_id
         resp.region_id = region_id
-        resp.stokes = 0  # Not implemented
+        resp.stokes = stokes
+
+        # # Test
+        # t0 = perf_counter_ns()
+
+        # spec_profile = await self.fm.async_get_point_spectrum(
+        #     file_id=file_id,
+        #     x=x,
+        #     y=y,
+        #     channel=slice(None),
+        #     stokes=stokes,
+        #     time=time,
+        #     memmap=memmap,
+        #     dtype=dtype,
+        #     semaphore=self.semaphore,
+        # )
+
+        # clog.debug(f"spec_profile dtype: {spec_profile.dtype}")
+
+        # dt = (perf_counter_ns() - t0) / 1e6
+        # msg = f"Load point spectrum in {dt:.3f} ms"
+        # pflog.debug(msg)
+
+        # t0 = perf_counter_ns()
+
+        # if region_id == 0:
+        #     clog.debug("here1")
+        #     sp.raw_values_fp32 = spec_profile.tobytes()
+        # else:
+        #     clog.debug("here2")
+        #     sp.raw_values_fp64 = spec_profile.tobytes()
+
+        # dt = (perf_counter_ns() - t0) / 1e6
+        # msg = f"Encode point spectrum in {dt:.3f} ms"
+        # pflog.debug(msg)
+
+        # t0 = perf_counter_ns()
+
+        # for i in range(10):
+        #     resp.progress = (i + 1) / 10
+        #     if len(resp.profiles) > 0:
+        #         resp.profiles.pop()
+        #     resp.profiles.append(sp)
+
+        #     # Encode message
+        #     event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
+        #     message = self.encode_message(event_type, request_id, resp)
+        #     self.queue.put_nowait(message)
+        #     await asyncio.sleep(0)
+
+        # resp.progress = 1.0
+        # resp.profiles.append(sp)
+
+        # # Encode message
+        # event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
+        # message = self.encode_message(event_type, request_id, resp)
+        # self.queue.put_nowait(message)
+        # await asyncio.sleep(0)
+
+        # if region_id == 0:
+        #     msg_add = " cursor"
+        # else:
+        #     msg_add = ""
+
+        # dt = (perf_counter_ns() - t0) / 1e6
+        # msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
+        # pflog.debug(msg)
+        # return
 
         # Set progress parameters
         current_channel = 0
@@ -1243,8 +1323,12 @@ class Session:
                 x=x,
                 y=y,
                 channel=channel_slice,
-                stokes=0,
-                time=0,
+                stokes=stokes,
+                time=time,
+                memmap=memmap,
+                dtype=dtype,
+                semaphore=self.semaphore,
+                use_dask=True,
             )
             spec_profile[channel_slice] = part_spec_prof
 
@@ -1263,9 +1347,7 @@ class Session:
             if region_id == 0:
                 sp.raw_values_fp32 = spec_profile.tobytes()
             else:
-                sp.raw_values_fp64 = spec_profile.astype(
-                    np.float64, copy=False
-                ).tobytes()
+                sp.raw_values_fp64 = spec_profile.tobytes()
 
             resp.progress = progress
             if len(resp.profiles) > 0:
