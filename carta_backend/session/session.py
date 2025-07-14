@@ -79,6 +79,7 @@ class Session:
         starting_folder: str = None,
         lock: asyncio.Lock = None,
         client: Client = None,
+        use_dask: bool = False,
     ):
         self.session_id = session_id
         self.top_level_folder = Path(top_level_folder)
@@ -86,6 +87,7 @@ class Session:
         self.lock = lock or asyncio.Lock()
         self.client = client
         self.fm = FileManager(client)
+        self.use_dask = use_dask
 
         # Set up message queue
         self.queue = asyncio.Queue()
@@ -1301,6 +1303,9 @@ class Session:
         else:
             dt_partial_update = TARGET_PARTIAL_REGION_TIME
 
+        if self.use_dask:
+            clog.debug("Using Dask to load point spectrum")
+
         while progress < 1.0:
             # Check if cursor/region changed
             if token is not None:
@@ -1328,7 +1333,7 @@ class Session:
                 memmap=memmap,
                 dtype=dtype,
                 semaphore=self.semaphore,
-                use_dask=True,
+                use_dask=self.use_dask,
             )
             spec_profile[channel_slice] = part_spec_prof
 

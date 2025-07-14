@@ -594,7 +594,6 @@ class FileManager:
             semaphore = asyncio.Semaphore(max_workers)
 
         if use_dask:
-            clog.debug("Using Dask to load point spectrum")
             data = load_data(
                 data=self.files[file_id].data,
                 x=x,
