@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -5,6 +6,7 @@ from itertools import product
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
+import aiofiles
 import dask.array as da
 import numba as nb
 import numpy as np
@@ -995,6 +997,41 @@ def get_zarr_info(file_path: Union[str, Path]) -> Tuple:
         shape = sky["shape"]
         chunk_shape = sky["chunks"]
         dtype = np.dtype(sky["dtype"])
+        order = sky["order"]
+    return shape, chunk_shape, dtype, order, compressor_config
+
+
+async def async_get_zarr_info(file_path: Union[str, Path]) -> Tuple:
+    """
+    Retrieve metadata information from a Zarr file.
+
+    This function reads the '.zarray' metadata file of a Zarr dataset to
+    extract information about the data's shape, chunking, data type, and
+    compression configuration.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+
+    Returns
+    -------
+    Tuple
+        A tuple containing:
+        - shape: The shape of the Zarr array.
+        - chunk_shape: The shape of the chunks in the Zarr array.
+        - dtype: The numpy data type of the Zarr array.
+        - order: The memory layout order ('C' for row-major, 'F' for column-major).
+        - compressor_config: The compression configuration of the Zarr array.
+    """
+    file_path = Path(file_path)
+    async with aiofiles.open(file_path / "SKY" / ".zarray", "r") as f:
+        sky = await f.read()
+        sky = json.loads(sky)
+        compressor_config = sky["compressor"]
+        shape = sky["shape"]
+        chunk_shape = sky["chunks"]
+        dtype = np.dtype(sky["dtype"])
         order = sky.get("order", "C")
     return shape, chunk_shape, dtype, order, compressor_config
 
@@ -1135,6 +1172,116 @@ def read_zarr_slice(
     return np.squeeze(np.swapaxes(result, 3, 4))
 
 
+async def async_read_zarr_slice(
+    file_path: Union[str, Path],
+    time: slice | int | None = None,
+    frequency: slice | int | None = None,
+    polarization: slice | int | None = None,
+    ll: slice | int | None = None,
+    mm: slice | int | None = None,
+) -> np.ndarray:
+    """
+    Read a slice of data from a Zarr file.
+
+    This function reads a slice of data from a Zarr file, taking into account
+    the chunking and compression of the data.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+    time : slice | int | None, optional
+        The slice of time to read. Defaults to None (all).
+    frequency : slice | int | None, optional
+        The slice of frequency to read. Defaults to None (all).
+    polarization : slice | int | None, optional
+        The slice of polarization to read. Defaults to None (all).
+    ll : slice | int | None, optional
+        The slice of l to read. Defaults to None (all).
+    mm : slice | int | None, optional
+        The slice of m to read. Defaults to None (all).
+
+    Returns
+    -------
+    np.ndarray
+        The slice of data read from the Zarr file.
+    """
+    if time is None:
+        time = slice(None)
+    if frequency is None:
+        frequency = slice(None)
+    if polarization is None:
+        polarization = slice(None)
+    if ll is None:
+        ll = slice(None)
+    if mm is None:
+        mm = slice(None)
+
+    file_path = Path(file_path)
+    (
+        shape,
+        chunk_full_shape,
+        dtype,
+        order,
+        comp_config,
+    ) = await async_get_zarr_info(file_path)
+    slices = (time, frequency, polarization, ll, mm)
+    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
+
+    if comp_config is not None:
+        compressor = get_codec(comp_config)
+
+    result = np.empty(output_shape, dtype=dtype)
+
+    async def read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        def read_chunk():
+            chunk_data = np.memmap(
+                chunk_filename,
+                mode="r",
+                shape=chunk_full_shape,
+                dtype=dtype,
+                order=order,
+            )
+            data_piece = chunk_data[chunk_slice]
+            return data_piece
+
+        result[global_slice] = await asyncio.to_thread(read_chunk)
+
+    async def decomp_read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        async with aiofiles.open(chunk_filename, "rb") as f:
+            compressed = await f.read()
+            decompressed = await asyncio.to_thread(
+                compressor.decode, compressed
+            )
+
+        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
+            chunk_full_shape, order=order
+        )
+        data_piece = chunk_data[chunk_slice]
+        result[global_slice] = data_piece
+
+    if comp_config is not None:
+        func = decomp_read_and_insert
+    else:
+        func = read_and_insert
+
+    await asyncio.gather(*[func(plan) for plan in plans])
+
+    return np.squeeze(np.swapaxes(result, 3, 4))
+
+
 def read_zarr_channel(
     file_path: Union[str, Path],
     frequency: int,
@@ -1196,13 +1343,15 @@ def read_zarr_channel(
         chunk_id = plan["chunk_id"]
         chunk_slice = plan["chunk_slice"]
         global_slice = plan["global_slice"]
+        channel_chunk_slice = tuple(i for i in chunk_slice[-2:])
+        channel_global_slice = tuple(i for i in global_slice[-2:])
 
         layer_shape = chunk_full_shape[-2:]
 
         chunk_filename = file_path / "SKY" / chunk_id
 
         start = np.ravel_multi_index(
-            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape
+            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape, order=order
         )
         nitems = np.prod(layer_shape)
 
@@ -1213,11 +1362,123 @@ def read_zarr_channel(
         chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
             layer_shape, order=order
         )
-        data_piece = chunk_data[tuple(i for i in chunk_slice[-2:])]
-        result[tuple(i for i in global_slice[-2:])] = data_piece
+        data_piece = chunk_data[channel_chunk_slice]
+        result[channel_global_slice] = data_piece
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         _ = list(executor.map(decomp_read_and_insert, plans))
+
+    return np.swapaxes(result, 0, 1)
+
+
+async def async_read_zarr_channel(
+    file_path: Union[str, Path],
+    frequency: int,
+    polarization: int,
+    time: int = 0,
+) -> np.ndarray:
+    """
+    Read a channel from a Zarr file.
+
+    This function reads a channel from a Zarr file, taking into account
+    the chunking and compression of the data.
+
+    Parameters
+    ----------
+    file_path : Union[str, Path]
+        The path to the Zarr dataset directory.
+    frequency : int
+        The frequency index to read.
+    polarization : int
+        The polarization index to read.
+    time : int, optional
+        The time index to read. Defaults to 0.
+
+    Returns
+    -------
+    np.ndarray
+        The channel read from the Zarr file.
+    """
+
+    ll = slice(None)
+    mm = slice(None)
+
+    file_path = Path(file_path)
+    (
+        shape,
+        chunk_full_shape,
+        dtype,
+        order,
+        comp_config,
+    ) = await async_get_zarr_info(file_path)
+
+    if comp_config is not None:
+        compressor = get_codec(comp_config)
+
+    slices = (time, frequency, polarization, ll, mm)
+    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
+
+    result = np.empty(output_shape[-2:], dtype=dtype)
+
+    async def read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+        channel_chunk_slice = tuple(i for i in chunk_slice[-2:])
+        channel_global_slice = tuple(i for i in global_slice[-2:])
+
+        layer_shape = chunk_full_shape[-2:]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        start = np.ravel_multi_index(
+            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape
+        )
+        nitems = np.prod(layer_shape)
+
+        async with aiofiles.open(chunk_filename, "rb") as f:
+            await f.seek(start)
+            chunk_data = await f.read(nitems * dtype.itemsize)
+            chunk_data = np.frombuffer(chunk_data, dtype=dtype).reshape(
+                layer_shape, order=order
+            )
+
+        data_piece = chunk_data[channel_chunk_slice]
+        result[channel_global_slice] = data_piece
+
+    async def decomp_read_and_insert(plan):
+        chunk_id = plan["chunk_id"]
+        chunk_slice = plan["chunk_slice"]
+        global_slice = plan["global_slice"]
+        channel_chunk_slice = tuple(i for i in chunk_slice[-2:])
+        channel_global_slice = tuple(i for i in global_slice[-2:])
+
+        layer_shape = chunk_full_shape[-2:]
+
+        chunk_filename = file_path / "SKY" / chunk_id
+
+        start = np.ravel_multi_index(
+            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape
+        )
+        nitems = np.prod(layer_shape)
+
+        async with aiofiles.open(chunk_filename, "rb") as f:
+            compressed = await f.read()
+            decompressed = await asyncio.to_thread(
+                compressor.decode_partial, compressed, start, nitems
+            )
+
+        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
+            layer_shape, order=order
+        )
+        data_piece = chunk_data[channel_chunk_slice]
+        result[channel_global_slice] = data_piece
+
+    func = (
+        decomp_read_and_insert if comp_config is not None else read_and_insert
+    )
+
+    await asyncio.gather(*[func(plan) for plan in plans])
 
     return np.swapaxes(result, 0, 1)
 

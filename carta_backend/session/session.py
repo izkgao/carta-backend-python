@@ -488,10 +488,7 @@ class Session:
         # Load image
         t0 = perf_counter_ns()
 
-        # data = await self.fm.get_slice(file_id, channel, stokes, mip=mip)
-        data = await asyncio.to_thread(
-            self.fm.get_channel, file_id, channel, stokes
-        )
+        data = await self.fm.async_get_channel(file_id, channel, stokes)
 
         dt = (perf_counter_ns() - t0) / 1e6
 
@@ -581,10 +578,7 @@ class Session:
         t0 = perf_counter_ns()
         if tiles is None or tiles[0] == 0:
             # Send the entire image in full resolution
-            # data = await self.fm.get_slice(file_id, channel, stokes)
-            data = await asyncio.to_thread(
-                self.fm.get_channel, file_id, channel, stokes
-            )
+            data = await self.fm.async_get_channel(file_id, channel, stokes)
             if isinstance(data, da.Array):
                 data = await self.client.compute(data[:, :], priority=priority)
             self.send_RasterTileData(
@@ -599,8 +593,7 @@ class Session:
         else:
             # Send tiles
             layer = decode_tile_coord(tiles[0])[2]
-            data = await asyncio.to_thread(
-                self.fm.get_channel_mip,
+            data = await self.fm.async_get_channel_mip(
                 file_id=file_id,
                 channel=channel,
                 stokes=stokes,
@@ -986,7 +979,9 @@ class Session:
 
         # Get data
         shape = self.fm.files[file_id].img_shape
-        data = self.fm.get_channel_mip(file_id, channel, stokes, mip=mip)
+        data = await self.fm.async_get_channel_mip(
+            file_id, channel, stokes, mip=mip
+        )
 
         start = [slice_x.start, slice_y.start]
         stop = [slice_x.stop, slice_y.stop]
@@ -1243,8 +1238,7 @@ class Session:
             delta_z = min(delta_z, channel_size - current_channel)
             channel_slice = slice(current_channel, current_channel + delta_z)
 
-            part_spec_prof = await asyncio.to_thread(
-                self.fm.get_point_spectrum,
+            part_spec_prof = await self.fm.async_get_point_spectrum(
                 file_id=file_id,
                 x=x,
                 y=y,

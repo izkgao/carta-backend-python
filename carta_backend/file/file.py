@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from glob import glob
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import dask.array as da
 import numpy as np
@@ -17,6 +17,8 @@ from xarray import Dataset, open_zarr
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (
+    async_read_zarr_channel,
+    async_read_zarr_slice,
     block_reduce_numba,
     get_axes_dict,
     get_file_type,
@@ -40,6 +42,7 @@ class FileData:
     file_path: Path
     data: np.ndarray | da.Array | Dataset
     memmap: np.ndarray | Dataset | None
+    memmap_info: Dict[str, Any] | None
     dask_channels: da.Array | None
     header: fits.Header
     wcs: WCS
@@ -214,6 +217,8 @@ class FileManager:
         else:
             use_dask = False
 
+        use_dask = True
+
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
@@ -250,6 +255,89 @@ class FileManager:
                     frequency=channel,
                     polarization=stokes,
                     max_workers=2,
+                )
+
+        # Convert to float32 to avoid using dtype >f4
+        t0 = perf_counter_ns()
+        data = data.astype(np.float32, copy=False)
+
+        if isinstance(data, np.ndarray):
+            dt = (perf_counter_ns() - t0) / 1e6
+            msg = f"Converted to float32 in {dt:.3f} ms"
+            clog.debug(msg)
+
+        # Cache data (including dask array)
+        self.channel_cache[name] = data
+        return data
+
+    async def async_get_channel(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+    ):
+        # Generate names
+        name = f"{file_id}_{channel}_{stokes}_{time}_1"
+        clog.debug(f"Channel cache keys: {list(self.channel_cache.keys())}")
+        clog.debug(f"Getting channel for {name}")
+
+        # Check cache
+        if name in list(self.channel_cache.keys()):
+            clog.debug(f"Using cached data for {name}")
+            return self.channel_cache[name]
+        else:
+            # This means that the user is viewing another channel/stokes
+            # so we can clear the channel cache of previous channel/stokes
+            for key in list(self.channel_cache.keys()):
+                if not key.startswith(name[:-2]):
+                    clog.debug(f"Clearing channel cache for {key}")
+                    del self.channel_cache[key]
+
+        # If the frame size is less than half of the available memory,
+        # load the full frame into memory
+        frame_size = self.files[file_id].frame_size
+        if frame_size > (self.avail_mem * 0.25):
+            use_dask = True
+        else:
+            use_dask = False
+
+        # Load data
+        file_type = self.files[file_id].file_type
+        wcs = self.files[file_id].wcs
+
+        if use_dask:
+            # Can be FITS or Zarr
+            clog.debug("Using dask to load channel")
+            _data = self.files[file_id].dask_channels
+            data = load_data(
+                data=_data,
+                x=None,
+                y=None,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                wcs=wcs,
+            )
+        else:
+            if file_type == CARTA.FileType.FITS:
+                _data = self.files[file_id].memmap
+                data = load_data(
+                    data=_data,
+                    x=None,
+                    y=None,
+                    channel=channel,
+                    stokes=stokes,
+                    time=time,
+                    wcs=wcs,
+                )
+            elif file_type == CARTA.FileType.CASA:
+                file_path = self.files[file_id].file_path
+                data = await async_read_zarr_channel(
+                    file_path=file_path,
+                    time=time,
+                    frequency=channel,
+                    polarization=stokes,
                 )
 
         # Convert to float32 to avoid using dtype >f4
@@ -318,6 +406,64 @@ class FileManager:
                 )
             else:
                 data = block_reduce_numba(data, mip)
+
+        # Cache data (including dask array)
+        self.channel_cache[name] = data
+        return data
+
+    async def async_get_channel_mip(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        layer: int | None = None,
+        mip: int = 1,
+    ):
+        # Convert layer to mip
+        if layer is not None:
+            mip = layer_to_mip(
+                layer,
+                image_shape=self.files[file_id].img_shape,
+                tile_shape=TILE_SHAPE,
+            )
+
+        if mip <= 1:
+            return await self.async_get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+
+        # Generate names
+        name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+        clog.debug(f"Cache keys: {list(self.channel_cache.keys())}")
+        clog.debug(f"Getting channel mip for {name}")
+
+        # Check cache
+        if name in list(self.channel_cache.keys()):
+            clog.debug(f"Using cached data for {name}")
+            return self.channel_cache[name]
+        else:
+            data = await self.async_get_channel(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+            )
+
+        # Downsample data
+        if mip > 1:
+            if isinstance(data, da.Array):
+                data = da.coarsen(
+                    da.nanmean,
+                    data,
+                    {0: mip, 1: mip},
+                    trim_excess=True,
+                )
+            else:
+                data = await asyncio.to_thread(block_reduce_numba, data, mip)
 
         # Cache data (including dask array)
         self.channel_cache[name] = data
@@ -418,6 +564,43 @@ class FileManager:
                 ll=x,
                 mm=y,
                 max_workers=2,
+            )
+
+        return data
+
+    async def async_get_point_spectrum(
+        self,
+        file_id: str,
+        x: int,
+        y: int,
+        channel: int | slice | None,
+        stokes: int,
+        time: int = 0,
+    ):
+        # Load data
+        file_type = self.files[file_id].file_type
+        wcs = self.files[file_id].wcs
+
+        if file_type == CARTA.FileType.FITS:
+            _data = self.files[file_id].memmap
+            data = load_data(
+                data=_data,
+                x=x,
+                y=y,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                wcs=wcs,
+            )
+        elif file_type == CARTA.FileType.CASA:
+            file_path = self.files[file_id].file_path
+            data = await async_read_zarr_slice(
+                file_path=file_path,
+                time=time,
+                frequency=channel,
+                polarization=stokes,
+                ll=x,
+                mm=y,
             )
 
         return data
@@ -531,7 +714,17 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         shape=shape,
         dtype=dtype,
         offset=offset,
+        order="F",
     )
+
+    memmap_info = {
+        "filename": file_path,
+        "dtype": dtype,
+        "mode": "r",
+        "shape": shape,
+        "offset": offset,
+        "order": "F",
+    }
 
     # Create FileData
     filedata = FileData(
@@ -545,6 +738,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         img_shape=img_shape,
         sizes=sizes,
         memmap=memmap,
+        memmap_info=memmap_info,
         hist_event=asyncio.Event(),
         data_size=data_size,
         frame_size=frame_size,
@@ -587,13 +781,6 @@ async def get_zarr_FileData(file_id, file_path, client=None):
     )
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
 
-    # Get unchunked data
-    if not zarr_is_chunked(file_path):
-        # If zarr is not chunked, read it as a single chunk
-        memmap = open_zarr(file_path, chunks=None)
-    else:
-        memmap = data
-
     data_size = data.SKY.nbytes / 1024**2
     factor = 1
     for k, v in data.SKY.sizes.items():
@@ -609,7 +796,8 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         file_path=Path(file_path),
         data=data,
         dask_channels=data,
-        memmap=memmap,
+        memmap=None,
+        memmap_info=None,
         header=header,
         wcs=wcs,
         file_type=CARTA.FileType.CASA,
