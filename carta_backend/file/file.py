@@ -30,6 +30,7 @@ from carta_backend.file.utils import (
     read_zarr_slice,
 )
 from carta_backend.log import logger
+from carta_backend.region.utils import numba_stats_2d
 from carta_backend.tile import layer_to_mip
 
 clog = logger.bind(name="CARTA")
@@ -533,6 +534,100 @@ class FileManager:
 
         return data
 
+    async def async_get_slice(
+        self,
+        file_id: str,
+        x: int | slice | None = None,
+        y: int | slice | None = None,
+        channel: int | slice | None = None,
+        stokes: int = 0,
+        time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        n_jobs: int = 4,
+        use_dask: bool = False,
+        return_future: bool = False,
+    ):
+        file_type = self.files[file_id].file_type
+        wcs = self.files[file_id].wcs
+        full_channel_size = self.files[file_id].sizes["frequency"]
+
+        if x is None:
+            x = slice(None)
+        if y is None:
+            y = slice(None)
+        if channel is None:
+            channel = slice(0, full_channel_size)
+
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(max_workers)
+
+        if use_dask:
+            data = load_data(
+                data=self.files[file_id].data,
+                x=x,
+                y=y,
+                channel=channel,
+                stokes=stokes,
+                time=time,
+                dtype=dtype,
+                wcs=wcs,
+            )
+            if not return_future:
+                data = await self.client.compute(data)
+            return data
+
+        if file_type == CARTA.FileType.FITS:
+            if memmap is None:
+                memmap_info = self.files[file_id].memmap_info
+                memmap = np.memmap(**memmap_info)
+
+            if channel.start is None:
+                start = 0
+            else:
+                start = channel.start
+            if channel.stop is None:
+                stop = full_channel_size
+            else:
+                stop = channel.stop
+            channel_size = stop - start
+
+            async def load_chunk(i):
+                ichannel = slice(
+                    start + i * channel_size // n_jobs,
+                    start + (i + 1) * channel_size // n_jobs,
+                )
+                async with semaphore:
+                    return await asyncio.to_thread(
+                        load_data,
+                        data=memmap,
+                        x=x,
+                        y=y,
+                        channel=ichannel,
+                        stokes=stokes,
+                        wcs=wcs,
+                        dtype=dtype,
+                    )
+
+            tasks = [load_chunk(i) for i in range(n_jobs)]
+            results = await asyncio.gather(*tasks)
+            data = np.concatenate(results, axis=0)
+        elif file_type == CARTA.FileType.CASA:
+            file_path = self.files[file_id].file_path
+            data = await async_read_zarr_slice(
+                file_path=file_path,
+                time=time,
+                frequency=channel,
+                polarization=stokes,
+                ll=x,
+                mm=y,
+                dtype=dtype,
+                semaphore=semaphore,
+            )
+        return data
+
     def get_point_spectrum(
         self,
         file_id: str,
@@ -547,7 +642,8 @@ class FileManager:
         wcs = self.files[file_id].wcs
 
         if file_type == CARTA.FileType.FITS:
-            _data = self.files[file_id].memmap
+            memmap_info = self.files[file_id].memmap_info
+            _data = np.memmap(**memmap_info)
             data = load_data(
                 data=_data,
                 x=x,
@@ -583,12 +679,13 @@ class FileManager:
         dtype: np.dtype | None = None,
         semaphore: asyncio.Semaphore | None = None,
         max_workers: int = 4,
+        n_jobs: int = 4,
         use_dask: bool = False,
     ):
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
-        channel_size = self.files[file_id].sizes["frequency"]
+        full_channel_size = self.files[file_id].sizes["frequency"]
 
         if semaphore is None:
             semaphore = asyncio.Semaphore(max_workers)
@@ -613,21 +710,21 @@ class FileManager:
                 memmap = np.memmap(**memmap_info)
 
             if channel is None:
-                channel = slice(0, channel_size)
+                channel = slice(0, full_channel_size)
             if channel.start is None:
                 start = 0
             else:
                 start = channel.start
             if channel.stop is None:
-                stop = channel_size
+                stop = full_channel_size
             else:
                 stop = channel.stop
             channel_size = stop - start
 
             async def load_chunk(i):
                 ichannel = slice(
-                    start + i * channel_size // max_workers,
-                    start + (i + 1) * channel_size // max_workers,
+                    start + i * channel_size // n_jobs,
+                    start + (i + 1) * channel_size // n_jobs,
                 )
                 async with semaphore:
                     return await asyncio.to_thread(
@@ -641,7 +738,7 @@ class FileManager:
                         dtype=dtype,
                     )
 
-            tasks = [load_chunk(i) for i in range(max_workers)]
+            tasks = [load_chunk(i) for i in range(n_jobs)]
             results = await asyncio.gather(*tasks)
             data = np.concatenate(results, axis=0)
         elif file_type == CARTA.FileType.CASA:
@@ -657,6 +754,55 @@ class FileManager:
                 semaphore=semaphore,
             )
         return data
+
+    async def async_get_region_spectrum(
+        self,
+        file_id: str,
+        sub_mask: np.ndarray,
+        x: int | slice | None,
+        y: int | slice | None,
+        channel: int | slice | None,
+        stokes: int = 0,
+        time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        n_jobs: int = 4,
+        use_dask: bool = False,
+    ):
+        hdr = self.files[file_id].header
+        try:
+            bmaj, bmin, pix_area = hdr["BMAJ"], hdr["BMIN"], hdr["PIX_AREA"]
+            beam_area = np.pi * bmaj * bmin / (4 * np.log(2)) / pix_area
+        except KeyError:
+            clog.warning("Beam area not found in header, using 1.")
+            beam_area = 1
+
+        data = await self.async_get_slice(
+            file_id=file_id,
+            x=x,
+            y=y,
+            channel=channel,
+            stokes=stokes,
+            time=time,
+            memmap=memmap,
+            dtype=dtype,
+            semaphore=semaphore,
+            max_workers=max_workers,
+            n_jobs=n_jobs,
+            use_dask=use_dask,
+        )
+
+        def _get_stats(data):
+            data = data[:, sub_mask.astype(bool)]
+            if dtype == np.float32:
+                data = data.astype(np.float64, copy=False)
+            stats = numba_stats_2d(data, beam_area)
+            return stats
+
+        stats = await asyncio.to_thread(_get_stats, data)
+        return stats
 
     def close(self, file_id):
         """Remove a file from the manager."""

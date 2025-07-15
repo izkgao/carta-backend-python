@@ -36,6 +36,7 @@ from carta_backend.log import logger
 from carta_backend.region import get_region
 from carta_backend.region.utils import (
     RegionData,
+    get_region_slices_mask,
     get_spectral_profile_dask,
     parse_region,
 )
@@ -961,7 +962,7 @@ class Session:
                 x=x,
                 y=y,
                 stats_type=2,
-                cursor_token=cursor_token,
+                token=cursor_token,
             )
 
         return None
@@ -1107,6 +1108,17 @@ class Session:
 
         return None
 
+    async def dask_executor_for_region(self, input_queue, output_queue):
+        while True:
+            item = await input_queue.get()
+            if item is None:
+                input_queue.task_done()
+                break
+            future, info = item
+            result = await self.client.compute(future)
+            output_queue.put_nowait((result, info))
+            input_queue.task_done()
+
     async def send_SpectralProfileData(
         self,
         request_id: int,
@@ -1115,20 +1127,14 @@ class Session:
         region_info: CARTA.RegionInfo | None = None,
         x: int | None = None,
         y: int | None = None,
+        stokes: int = 0,
+        time: int = 0,
         stats_type: int = 2,
-        cursor_token: int | None = None,
+        token: int | None = None,
     ) -> None:
-        t0 = perf_counter_ns()
-
-        # Get spectral profile
-        sp = CARTA.SpectralProfile()
-        sp.coordinate = "z"
-        sp.stats_type = stats_type
-
         if region_id == 0:
             # Cursor
             is_point = True
-            token = cursor_token
         elif (
             region_info is not None
             and region_info.region_type == CARTA.RegionType.POINT
@@ -1137,12 +1143,11 @@ class Session:
             points = region_info.control_points
             x, y = round(points[0].x), round(points[0].y)
             is_point = True
-            token = self.region_dict[region_id].token
         else:
             # Other regions
             is_point = False
-            token = None
 
+        # Point/cursor spectral profile
         if is_point:
             await self.send_SpectralProfileData_point(
                 request_id=request_id,
@@ -1150,41 +1155,213 @@ class Session:
                 region_id=region_id,
                 x=x,
                 y=y,
+                stokes=stokes,
+                time=time,
                 stats_type=stats_type,
                 token=token,
             )
             return None
-        else:
-            # Region spectral profile
-            if self.region_dict[region_id].profiles is None:
-                data = await self.fm.get_slice(file_id, channel=None, stokes=0)
-                hdr = self.fm.files[file_id].header
-                region = get_region(region_info)
-                profiles = get_spectral_profile_dask(data, region, hdr)
-                profiles = await self.client.compute(profiles)
-                self.region_dict[region_id].profiles = profiles
 
+        t0 = perf_counter_ns()
+
+        if self.region_dict[region_id].profiles is not None:
+            # Get spectral profile
+            sp = CARTA.SpectralProfile()
+            sp.coordinate = "z"
+            sp.stats_type = stats_type
             profile = self.region_dict[region_id].profiles[stats_type - 2]
             sp.raw_values_fp64 = profile.tobytes()
-            msg_add = ""
+
+            # Create response object
+            resp = CARTA.SpectralProfileData()
+            resp.file_id = file_id
+            resp.region_id = region_id
+            resp.stokes = stokes
+            resp.progress = 1.0
+            resp.profiles.append(sp)
+
+            # Send message
+            event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
+            message = self.encode_message(event_type, request_id, resp)
+            self.queue.put_nowait(message)
+
+            dt = (perf_counter_ns() - t0) / 1e6
+            msg = f"Fill region spectral profile in {dt:.3f} ms"
+            pflog.debug(msg)
+
+            return None
+
+        # Initilize spectral profile
+        dtype = np.float64
+        channel_size = self.fm.files[file_id].sizes["frequency"]
+        if channel_size is None:
+            return None
+        spec_profiles = np.full((9, channel_size), np.nan, dtype=dtype)
+
+        # Get header and region
+        hdr = self.fm.files[file_id].header
+        region = get_region(region_info)
+
+        # Create spectral profile object
+        sp = CARTA.SpectralProfile()
+        sp.coordinate = "z"
+        sp.stats_type = stats_type
 
         # Create response object
         resp = CARTA.SpectralProfileData()
         resp.file_id = file_id
         resp.region_id = region_id
-        resp.stokes = 0
-        resp.progress = 1
-        resp.profiles.append(sp)
+        resp.stokes = stokes
 
-        # Send message
-        event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
-        message = self.encode_message(event_type, request_id, resp)
-        self.queue.put_nowait(message)
+        # Set progress parameters
+        current_channel = 0
+        progress = 0.0
+        delta_z = INIT_DELTA_Z
+        dt_partial_update = TARGET_PARTIAL_REGION_TIME
+        count = 0
+
+        # Get slices and region submask
+        slicex, slicey, sub_mask = get_region_slices_mask(region_info)
+
+        # Initialize variable executor_task
+        executor_task = None
+
+        while progress < 1.0:
+            # Check if region changed
+            if token is not None:
+                current_token = self.region_dict[region_id].token
+                if token != current_token:
+                    msg = "Discarding obsolete point spectral profile "
+                    pflog.debug(msg)
+                    return None
+
+            t_start_slice = perf_counter_ns()
+
+            delta_z = min(delta_z, channel_size - current_channel)
+            channel_slice = slice(current_channel, current_channel + delta_z)
+
+            start = channel_slice.start
+            stop = channel_size
+
+            if self.use_dask:
+                if count == 8 and (stop - start) / delta_z > 3:
+                    # If there are more than 3 chunks to process, process
+                    # them in parallel and await the futures in later cycles
+                    delta_z = min(delta_z, channel_size - current_channel)
+
+                    input_queue = asyncio.Queue()
+                    output_queue = asyncio.Queue()
+                    executor_task = asyncio.create_task(
+                        self.dask_executor_for_region(
+                            input_queue, output_queue
+                        )
+                    )
+
+                    for istart in range(start, stop, delta_z):
+                        istop = min(istart + delta_z, stop)
+                        channel_slice = slice(istart, istop)
+                        data = await self.fm.async_get_slice(
+                            file_id=file_id,
+                            channel=channel_slice,
+                            stokes=stokes,
+                            dtype=dtype,
+                            use_dask=self.use_dask,
+                            return_future=True,
+                        )
+                        future = get_spectral_profile_dask(data, region, hdr)
+                        input_queue.put_nowait([future, channel_slice])
+
+                    part_spec_profs, channel_slice = await output_queue.get()
+                elif executor_task is not None:
+                    part_spec_profs, channel_slice = await output_queue.get()
+                else:
+                    # Process the data in serial
+                    data = await self.fm.async_get_slice(
+                        file_id=file_id,
+                        channel=channel_slice,
+                        stokes=stokes,
+                        dtype=dtype,
+                        use_dask=self.use_dask,
+                        return_future=True,
+                    )
+                    part_spec_profs = get_spectral_profile_dask(
+                        data, region, hdr
+                    )
+                    part_spec_profs = await self.client.compute(
+                        part_spec_profs
+                    )
+            else:
+                part_spec_profs = await self.fm.async_get_region_spectrum(
+                    file_id=file_id,
+                    sub_mask=sub_mask,
+                    x=slicex,
+                    y=slicey,
+                    channel=channel_slice,
+                    stokes=stokes,
+                    time=time,
+                    dtype=dtype,
+                    semaphore=self.semaphore,
+                    n_jobs=8,
+                    use_dask=self.use_dask,
+                )
+
+            spec_profiles[:, channel_slice] = part_spec_profs
+
+            current_channel = channel_slice.stop
+            progress = current_channel / channel_size
+
+            t_end_slice = perf_counter_ns()
+
+            # Adjust delta_z based on time taken
+            time_taken_ms = (t_end_slice - t_start_slice) / 1e6
+            adjustment_factor = dt_partial_update / time_taken_ms
+            delta_z = int(
+                max(1, min(delta_z * adjustment_factor, channel_size))
+            )
+
+            sp.raw_values_fp64 = spec_profiles[stats_type - 2].tobytes()
+
+            resp.progress = progress
+            if len(resp.profiles) > 0:
+                resp.profiles.pop()
+            resp.profiles.append(sp)
+
+            # Encode message
+            event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
+            message = self.encode_message(event_type, request_id, resp)
+
+            # Check if cursor/region changed
+            await asyncio.sleep(0)
+            if token is not None:
+                current_token = self.region_dict[region_id].token
+                if token != current_token:
+                    msg = "Discarding obsolete point spectral profile "
+                    pflog.debug(msg)
+                    if executor_task is not None:
+                        input_queue.put_nowait(None)
+                        await input_queue.join()
+                        await output_queue.join()
+                        await executor_task
+                    return None
+
+            # Send message
+            self.queue.put_nowait(message)
+            await asyncio.sleep(0)
+
+            count += 1
 
         dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
+        msg = f"Fill region spectral profile in {dt:.3f} ms"
         pflog.debug(msg)
 
+        async with self.lock:
+            self.region_dict[region_id].profiles = spec_profiles
+
+        if executor_task is not None:
+            input_queue.put_nowait(None)
+            await input_queue.join()
+            await output_queue.join()
+            await executor_task
         return None
 
     async def send_SpectralProfileData_point(
@@ -1331,6 +1508,8 @@ class Session:
         if region_id <= 0:
             region_id = max(self.region_dict.keys(), default=0) + 1
 
+        region_token = perf_counter_ns()
+
         # Record region
         async with self.lock:
             if region_id not in self.region_dict:
@@ -1339,12 +1518,12 @@ class Session:
                     region_info=region_info,
                     preview_region=preview_region,
                     profiles=None,
-                    token=perf_counter_ns(),
+                    token=region_token,
                 )
             else:
                 self.region_dict[region_id].region_info = region_info
                 self.region_dict[region_id].profiles = None
-                self.region_dict[region_id].token = perf_counter_ns()
+                self.region_dict[region_id].token = region_token
 
         # Send message
         resp = CARTA.SetRegionAck()
@@ -1362,6 +1541,7 @@ class Session:
                 region_id,
                 region_info,
                 stats_type=self.prev_stats_type,
+                token=region_token,
             )
 
         return None
@@ -1408,6 +1588,7 @@ class Session:
                 region_info = self.region_dict[region_id].region_info
                 # stats_type = self.prev_stats_type
                 x, y = None, None
+                region_token = self.region_dict[region_id].token
 
         # Send spectral profile
         if self.spec_prof_on or self.spec_prof_cursor_on:
@@ -1421,6 +1602,7 @@ class Session:
                     stats_type=self.prev_stats_type,
                     x=x,
                     y=y,
+                    token=region_token,
                 )
             )
 
