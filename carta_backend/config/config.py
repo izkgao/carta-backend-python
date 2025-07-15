@@ -7,3 +7,7 @@ INIT_DELTA_Z = 10
 TARGET_DELTA_TIME = 50  # milliseconds
 TARGET_PARTIAL_CURSOR_TIME = 500  # milliseconds
 TARGET_PARTIAL_REGION_TIME = 1000  # milliseconds
+
+# I/O
+N_JOBS = 8
+N_SEMAPHORE = 4

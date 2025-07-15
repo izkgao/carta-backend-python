@@ -16,6 +16,8 @@ from carta_backend import proto as CARTA
 from carta_backend.config.config import (
     ICD_VERSION,
     INIT_DELTA_Z,
+    N_JOBS,
+    N_SEMAPHORE,
     TARGET_PARTIAL_CURSOR_TIME,
     TARGET_PARTIAL_REGION_TIME,
 )
@@ -94,7 +96,7 @@ class Session:
         self.queue = asyncio.Queue()
 
         # Set semaphore for reading data
-        self.semaphore = asyncio.Semaphore(4)
+        self.semaphore = asyncio.Semaphore(N_SEMAPHORE)
 
         # FileList
         self.flag_stop_file_list = False
@@ -1301,7 +1303,7 @@ class Session:
                     time=time,
                     dtype=dtype,
                     semaphore=self.semaphore,
-                    n_jobs=8,
+                    n_jobs=N_JOBS,
                     use_dask=self.use_dask,
                 )
 
@@ -1446,6 +1448,7 @@ class Session:
                 memmap=memmap,
                 dtype=dtype,
                 semaphore=self.semaphore,
+                n_jobs=N_JOBS,
                 use_dask=self.use_dask,
             )
             spec_profile[channel_slice] = part_spec_prof
