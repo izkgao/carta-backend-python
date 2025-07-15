@@ -1337,11 +1337,14 @@ class Session:
                 if token != current_token:
                     msg = "Discarding obsolete point spectral profile "
                     pflog.debug(msg)
+
+                    # Cancel executor task if it exists
                     if executor_task is not None:
-                        input_queue.put_nowait(None)
-                        await input_queue.join()
-                        await output_queue.join()
-                        await executor_task
+                        executor_task.cancel()
+                        try:
+                            await executor_task
+                        except asyncio.CancelledError:
+                            pass
                     return None
 
             # Send message
