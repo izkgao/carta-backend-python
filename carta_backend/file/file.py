@@ -36,22 +36,37 @@ ptlog = logger.bind(name="Protocol")
 
 @dataclass
 class FileData:
+    # File path
     file_path: Path
+    # for Dask
     data: da.Array | Dataset
-    memmap: np.ndarray | Dataset | None
+    # for creating memmap
     memmap_info: Dict[str, Any] | None
+    # for FITS image channels
     dask_channels: da.Array | None
+    # FITS header for FITS and Zarr
     header: fits.Header
+    # WCS for FITS and Zarr
     wcs: WCS
+    # 0: CASA (currently Zarr instead), 3: FITS
     file_type: int
+    # HDU index for FITS
     hdu_index: int
+    # Image shape
     img_shape: Tuple[int, int]
+    # Dict of sizes of each axis with xradio style keys
     sizes: Dict[str, int]
-    data_size: float  # Unit: MiB
-    frame_size: float  # Unit: MiB
+    # Total size of the file/HDU in MiB
+    data_size_mib: float
+    # Size of the frame in MiB
+    frame_size_mib: float
+    # Event to signal when histogram is ready
     hist_event: asyncio.Event
+    # Spatial requirements
     spat_req: Dict[str, Dict[str, int | None]]
+    # Cursor coordinates
     cursor_coords: List[int | None]
+    # Dict of axes with xradio style keys
     axes_dict: Dict[str, int] | None
 
 
@@ -106,8 +121,8 @@ class FileManager:
 
         # If the frame size is less than half of the available memory,
         # load the full frame into memory
-        frame_size = self.files[file_id].frame_size
-        if frame_size > (self.avail_mem * 0.25):
+        frame_size_mib = self.files[file_id].frame_size_mib
+        if frame_size_mib > (self.avail_mem * 0.25):
             use_dask = True
         else:
             use_dask = False
@@ -614,20 +629,11 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         np.linalg.det(wcs.celestial.pixel_scale_matrix)
     )
     img_shape = shape[-2:]
-    data_size = data.nbytes / 1024**2
-    frame_size = data_size / np.prod(data.shape[:-2])
+    data_size_mib = data.nbytes / 1024**2
+    frame_size_mib = data_size_mib / np.prod(data.shape[:-2])
 
     clog.debug(f"File ID '{file_id}' opened successfully")
     clog.debug(f"File dimensions: {shape}, chunking: {str(data.chunksize)}")
-
-    # Create memmap
-    memmap = np.memmap(
-        file_path,
-        mode="r",
-        shape=shape,
-        dtype=dtype,
-        offset=offset,
-    )
 
     memmap_info = {
         "filename": file_path,
@@ -648,11 +654,10 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         hdu_index=hdu_index,
         img_shape=img_shape,
         sizes=sizes,
-        memmap=memmap,
         memmap_info=memmap_info,
         hist_event=asyncio.Event(),
-        data_size=data_size,
-        frame_size=frame_size,
+        data_size_mib=data_size_mib,
+        frame_size_mib=frame_size_mib,
         spat_req={
             "x": {"start": 0, "end": None, "mip": 1, "width": 0},
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
@@ -692,12 +697,12 @@ async def get_zarr_FileData(file_id, file_path, client=None):
     )
     clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
 
-    data_size = data.SKY.nbytes / 1024**2
+    data_size_mib = data.SKY.nbytes / 1024**2
     factor = 1
     for k, v in data.SKY.sizes.items():
         if k not in ["l", "m"]:
             factor *= v
-    frame_size = data_size / factor
+    frame_size_mib = data_size_mib / factor
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FITSFixedWarning)
@@ -707,7 +712,6 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         file_path=Path(file_path),
         data=data,
         dask_channels=data,
-        memmap=None,
         memmap_info=None,
         header=header,
         wcs=wcs,
@@ -716,8 +720,8 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         img_shape=img_shape,
         sizes=sizes,
         hist_event=asyncio.Event(),
-        data_size=data_size,
-        frame_size=frame_size,
+        data_size_mib=data_size_mib,
+        frame_size_mib=frame_size_mib,
         spat_req={
             "x": {"start": 0, "end": None, "mip": 1, "width": 0},
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
