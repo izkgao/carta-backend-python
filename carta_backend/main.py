@@ -147,6 +147,11 @@ def main():
         action="store_true",
         help="Ignore system configuration file",
     )
+    parser.add_argument(
+        "--use_dask",
+        action="store_true",
+        help="Use Dask for file operations",
+    )
 
     # Debug options
     parser.add_argument(
@@ -261,6 +266,7 @@ def main():
         starting_folder=ps.starting_folder,
         dask_scheduler=args.dask_scheduler,
         file=ps.file,
+        use_dask=args.use_dask,
     )
 
     try:

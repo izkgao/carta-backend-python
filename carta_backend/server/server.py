@@ -50,6 +50,7 @@ class Server:
         starting_folder=None,
         dask_scheduler=None,
         file=None,
+        use_dask=False,
     ):
         """Initialize the Server instance.
 
@@ -72,6 +73,8 @@ class Server:
             Dask scheduler address, by default None
         file : str, optional
             File to open, by default None
+        use_dask : bool, optional
+            Whether to use Dask for file operations, by default False
         """
         self.frontend_folder = frontend_folder
         self.host = host
@@ -81,6 +84,7 @@ class Server:
         self.starting_folder = starting_folder
         self.dask_scheduler = dask_scheduler
         self.file = file
+        self.use_dask = use_dask
         self.client = None
         self.session = None
 
@@ -293,6 +297,7 @@ class Server:
             starting_folder=self.starting_folder,
             session_id=session_id,
             client=self.client,
+            use_dask=self.use_dask,
         )
 
     async def start_dask_client(self):
