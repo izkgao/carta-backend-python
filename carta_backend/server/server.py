@@ -304,8 +304,8 @@ class Server:
         if self.dask_scheduler is None:
             self.client = await Client(
                 asynchronous=True,
-                threads_per_worker=4,
-                n_workers=os.cpu_count() // 4,
+                threads_per_worker=2,
+                n_workers=os.cpu_count() // 2,
             )
         else:
             self.client = await Client(address=self.dask_scheduler)
