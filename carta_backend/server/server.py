@@ -85,8 +85,11 @@ class Server:
         self.dask_scheduler = dask_scheduler
         self.file = file
         self.use_dask = use_dask
+
         self.client = None
         self.session = None
+
+        self.dask_done = asyncio.Event()
 
     async def http_endpoint(self, request):
         """Serve the main HTML file.
@@ -286,11 +289,7 @@ class Server:
 
     async def create_session(self):
         session_id = randint(100000000, 999999999)
-        while True:
-            if self.client is None:
-                await asyncio.sleep(0.01)
-            else:
-                break
+        await self.dask_done.wait()
         self.session = Session(
             lock=asyncio.Lock(),
             top_level_folder=self.top_level_folder,
@@ -309,6 +308,7 @@ class Server:
             )
         else:
             self.client = await Client(address=self.dask_scheduler)
+        self.dask_done.set()
         clog.info("Dask client started.")
         clog.info(f"Dask scheduler served at {self.client.scheduler.address}")
         clog.info(f"Dask dashboard link: {self.client.dashboard_link}")

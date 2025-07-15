@@ -24,11 +24,11 @@ from carta_backend.config.config import (
 from carta_backend.file import (
     FileManager,
     get_directory_info,
-    get_file_info,
     get_file_info_extended,
     get_header_from_xradio,
 )
 from carta_backend.file.utils import (
+    async_get_file_info,
     get_region_file_type,
     is_accessible,
     is_casa,
@@ -279,7 +279,7 @@ class Session:
         items = os.listdir(directory)
 
         try:
-            for item in items:
+            async for item in iter(items):
                 # Check if operation was cancelled
                 async with self.lock:
                     if self.flag_stop_file_list:
@@ -311,7 +311,7 @@ class Session:
                         continue
                     # Treat .zarr folder as a file
                     elif item.endswith(".zarr"):
-                        file_info = get_file_info(item_path)
+                        file_info = await async_get_file_info(item_path)
                         files.append(file_info)
                     else:
                         dir_info = get_directory_info(item_path)
@@ -331,7 +331,7 @@ class Session:
                     elif extension not in extensions:
                         continue
 
-                    file_info = get_file_info(item_path)
+                    file_info = await async_get_file_info(item_path)
                     files.append(file_info)
 
             response.files.extend(files)
@@ -376,7 +376,7 @@ class Session:
         file_path = str(directory / file)
 
         # Get file info
-        file_info = get_file_info(file_path)
+        file_info = await async_get_file_info(file_path)
 
         # Create response object
         response = CARTA.FileInfoResponse()
@@ -435,7 +435,7 @@ class Session:
         file_name = file
         file_path = str(directory / file_name)
         hdu_index = int(hdu) if len(hdu) > 0 else 0
-        file_info = get_file_info(file_path)
+        file_info = await async_get_file_info(file_path)
 
         self.file_path = file_path
 
@@ -1656,7 +1656,7 @@ class Session:
         items = os.listdir(directory)
 
         try:
-            for item in items:
+            async for item in iter(items):
                 # Full path of item
                 item_path = directory / item
 
@@ -1687,7 +1687,7 @@ class Session:
                     if file_type == CARTA.FileType.UNKNOWN:
                         continue
 
-                    file_info = get_file_info(item_path, file_type)
+                    file_info = await async_get_file_info(item_path, file_type)
                     files.append(file_info)
 
             resp.files.extend(files)
@@ -1719,7 +1719,7 @@ class Session:
 
         # Get file info
         file_type = get_region_file_type(file_path)
-        file_info = get_file_info(file_path, file_type)
+        file_info = await async_get_file_info(file_path, file_type)
 
         # Create response object
         resp = CARTA.RegionFileInfoResponse()

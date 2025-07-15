@@ -19,7 +19,7 @@ from xarray import Dataset
 
 from carta_backend import proto as CARTA
 from carta_backend.log import logger
-from carta_backend.utils import get_folder_size
+from carta_backend.utils import async_get_folder_size, get_folder_size
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -95,6 +95,33 @@ def get_file_info(
     try:
         if os.path.isdir(path):
             file_info.size = get_folder_size(path)
+        else:
+            file_info.size = os.path.getsize(path)
+        file_info.HDU_list.append("")
+        file_info.date = int(os.path.getmtime(path))
+    except (PermissionError, OSError):
+        # Handle permission errors
+        file_info.type = CARTA.FileType.UNKNOWN
+        file_info.size = 0
+        file_info.HDU_list.append("")
+        file_info.date = 0
+
+    return file_info
+
+
+async def async_get_file_info(
+    path: str | Path, file_type: int | None = None
+) -> CARTA.FileInfo:
+    file_info = CARTA.FileInfo()
+    file_info.name = os.path.basename(path)
+
+    if file_type is None:
+        file_type = get_file_type(path)
+    file_info.type = file_type
+
+    try:
+        if os.path.isdir(path):
+            file_info.size = await async_get_folder_size(path)
         else:
             file_info.size = os.path.getsize(path)
         file_info.HDU_list.append("")
