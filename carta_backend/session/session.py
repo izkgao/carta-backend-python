@@ -1226,73 +1226,6 @@ class Session:
         resp.region_id = region_id
         resp.stokes = stokes
 
-        # # Test
-        # t0 = perf_counter_ns()
-
-        # spec_profile = await self.fm.async_get_point_spectrum(
-        #     file_id=file_id,
-        #     x=x,
-        #     y=y,
-        #     channel=slice(None),
-        #     stokes=stokes,
-        #     time=time,
-        #     memmap=memmap,
-        #     dtype=dtype,
-        #     semaphore=self.semaphore,
-        # )
-
-        # clog.debug(f"spec_profile dtype: {spec_profile.dtype}")
-
-        # dt = (perf_counter_ns() - t0) / 1e6
-        # msg = f"Load point spectrum in {dt:.3f} ms"
-        # pflog.debug(msg)
-
-        # t0 = perf_counter_ns()
-
-        # if region_id == 0:
-        #     clog.debug("here1")
-        #     sp.raw_values_fp32 = spec_profile.tobytes()
-        # else:
-        #     clog.debug("here2")
-        #     sp.raw_values_fp64 = spec_profile.tobytes()
-
-        # dt = (perf_counter_ns() - t0) / 1e6
-        # msg = f"Encode point spectrum in {dt:.3f} ms"
-        # pflog.debug(msg)
-
-        # t0 = perf_counter_ns()
-
-        # for i in range(10):
-        #     resp.progress = (i + 1) / 10
-        #     if len(resp.profiles) > 0:
-        #         resp.profiles.pop()
-        #     resp.profiles.append(sp)
-
-        #     # Encode message
-        #     event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
-        #     message = self.encode_message(event_type, request_id, resp)
-        #     self.queue.put_nowait(message)
-        #     await asyncio.sleep(0)
-
-        # resp.progress = 1.0
-        # resp.profiles.append(sp)
-
-        # # Encode message
-        # event_type = CARTA.EventType.SPECTRAL_PROFILE_DATA
-        # message = self.encode_message(event_type, request_id, resp)
-        # self.queue.put_nowait(message)
-        # await asyncio.sleep(0)
-
-        # if region_id == 0:
-        #     msg_add = " cursor"
-        # else:
-        #     msg_add = ""
-
-        # dt = (perf_counter_ns() - t0) / 1e6
-        # msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
-        # pflog.debug(msg)
-        # return
-
         # Set progress parameters
         current_channel = 0
         progress = 0.0
@@ -1379,12 +1312,8 @@ class Session:
             self.queue.put_nowait(message)
             await asyncio.sleep(0)
 
-        if region_id == 0:
-            msg_add = " cursor"
-        else:
-            msg_add = ""
-
         dt = (perf_counter_ns() - t0) / 1e6
+        msg_add = " cursor" if region_id == 0 else " point"
         msg = f"Fill{msg_add} spectral profile in {dt:.3f} ms"
         pflog.debug(msg)
 

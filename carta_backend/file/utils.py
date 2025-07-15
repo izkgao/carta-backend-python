@@ -1440,6 +1440,9 @@ async def async_read_zarr_channel(
     frequency: int,
     polarization: int,
     time: int = 0,
+    dtype: np.dtype | None = None,
+    semaphore: asyncio.Semaphore | None = None,
+    max_workers: int = 4,
 ) -> np.ndarray:
     """
     Read a channel from a Zarr file.
@@ -1457,6 +1460,14 @@ async def async_read_zarr_channel(
         The polarization index to read.
     time : int, optional
         The time index to read. Defaults to 0.
+    dtype : np.dtype | None, optional
+        The data type to convert the result to. If None, the original data
+        type is used.
+    semaphore : asyncio.Semaphore | None, optional
+        The semaphore to use for limiting the number of concurrent
+        read operations. If None, ``asyncio.Semaphore(max_workers)`` is used.
+    max_workers : int, optional
+        The maximum number of semaphores to use for reading. Defaults to 4.
 
     Returns
     -------
@@ -1466,6 +1477,8 @@ async def async_read_zarr_channel(
 
     ll = slice(None)
     mm = slice(None)
+
+    output_dtype = dtype
 
     file_path = Path(file_path)
     (
@@ -1478,6 +1491,9 @@ async def async_read_zarr_channel(
 
     if comp_config is not None:
         compressor = get_codec(comp_config)
+
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(max_workers)
 
     slices = (time, frequency, polarization, ll, mm)
     plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
@@ -1500,12 +1516,14 @@ async def async_read_zarr_channel(
         )
         nitems = np.prod(layer_shape)
 
-        async with aiofiles.open(chunk_filename, "rb") as f:
-            await f.seek(start)
-            chunk_data = await f.read(nitems * dtype.itemsize)
-            chunk_data = np.frombuffer(chunk_data, dtype=dtype).reshape(
-                layer_shape, order=order
-            )
+        async with semaphore:
+            async with aiofiles.open(chunk_filename, "rb") as f:
+                await f.seek(start)
+                chunk_data = await f.read(nitems * dtype.itemsize)
+
+        chunk_data = np.frombuffer(chunk_data, dtype=dtype).reshape(
+            layer_shape, order=order
+        )
 
         data_piece = chunk_data[channel_chunk_slice]
         result[channel_global_slice] = data_piece
@@ -1526,11 +1544,13 @@ async def async_read_zarr_channel(
         )
         nitems = np.prod(layer_shape)
 
-        async with aiofiles.open(chunk_filename, "rb") as f:
-            compressed = await f.read()
-            decompressed = await asyncio.to_thread(
-                compressor.decode_partial, compressed, start, nitems
-            )
+        async with semaphore:
+            async with aiofiles.open(chunk_filename, "rb") as f:
+                compressed = await f.read()
+
+        decompressed = await asyncio.to_thread(
+            compressor.decode_partial, compressed, start, nitems
+        )
 
         chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
             layer_shape, order=order
@@ -1544,7 +1564,11 @@ async def async_read_zarr_channel(
 
     await asyncio.gather(*[func(plan) for plan in plans])
 
-    return np.swapaxes(result, 0, 1)
+    result = np.swapaxes(result, 0, 1)
+
+    if output_dtype is not None:
+        result = result.astype(output_dtype, copy=False)
+    return result
 
 
 @delayed
