@@ -136,15 +136,16 @@ def isnan(x):
         return False
 
 
-@njit((nb.float64[:](nb.float32[:, :], nb.float64)), fastmath=True)
+@njit((nb.float64[:](nb.float64[:], nb.float64)), fastmath=True)
 def _numba_stats(data, beam_area):
     # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
     res = np.array(
-        [0, np.nan, np.nan, np.nan, np.nan, 0, np.inf, -np.inf, np.nan]
+        [0, np.nan, np.nan, np.nan, np.nan, 0, np.inf, -np.inf, np.nan],
+        dtype=np.float64,
     )
     pnum = 0
 
-    for i in data.ravel():
+    for i in data:
         if not isnan(i):
             # sum
             res[0] += i
@@ -182,13 +183,26 @@ def _numba_stats(data, beam_area):
 
 
 @njit(
-    (nb.float64[:, :](nb.float32[:, :, :], nb.float64)),
+    (nb.float64[:, :](nb.float64[:, :, :], nb.float64)),
     parallel=True,
     fastmath=True,
 )
 def numba_stats(data, beam_area):
     # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
-    res = np.zeros((9, data.shape[0]))
+    res = np.zeros((9, data.shape[0]), dtype=np.float64)
+    for i in prange(data.shape[0]):
+        res[:, i] = _numba_stats(data[i].ravel(), beam_area)
+    return res
+
+
+@njit(
+    (nb.float64[:, :](nb.float64[:, :], nb.float64)),
+    parallel=True,
+    fastmath=True,
+)
+def numba_stats_2d(data, beam_area):
+    # psum, pfld, pmean, prms, pstd, psumsq, pmin, pmax, pext
+    res = np.zeros((9, data.shape[0]), dtype=np.float64)
     for i in prange(data.shape[0]):
         res[:, i] = _numba_stats(data[i], beam_area)
     return res
@@ -286,7 +300,7 @@ def get_spectral_profile_dask(data, region, hdr):
 
     profiles = da.map_blocks(
         numba_stats,
-        mdata.astype("float32"),
+        mdata.astype("float64"),
         beam_area,
         dtype=np.float64,
         chunks=(9, data.chunks[0]),
