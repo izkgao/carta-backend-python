@@ -1178,21 +1178,6 @@ async def async_read_zarr_slice(
     np.ndarray
         The slice of data read from the Zarr file.
     """
-    if (
-        isinstance(channel, int)
-        and isinstance(stokes, int)
-        and isinstance(time, int)
-    ):
-        return await async_read_zarr_channel(
-            file_path=file_path,
-            channel=channel,
-            stokes=stokes,
-            time=time,
-            dtype=dtype,
-            semaphore=semaphore,
-            max_workers=max_workers,
-        )
-
     if time is None:
         time = slice(None)
     if channel is None:
@@ -1203,6 +1188,23 @@ async def async_read_zarr_slice(
         x = slice(None)
     if y is None:
         y = slice(None)
+
+    if (
+        isinstance(channel, int)
+        and isinstance(stokes, int)
+        and isinstance(time, int)
+    ):
+        return await async_read_zarr_channel(
+            file_path=file_path,
+            channel=channel,
+            x=x,
+            y=y,
+            stokes=stokes,
+            time=time,
+            dtype=dtype,
+            semaphore=semaphore,
+            max_workers=max_workers,
+        )
 
     output_dtype = dtype
 
