@@ -8,10 +8,17 @@ This experimental package is still under development and not ready for productio
 ```bash
 git clone https://github.com/izkgao/carta-backend-python.git
 cd carta-backend-python
-git submodule update --init --recursive
 ```
 
-## Install
+## Install (using uv) (recommended)
+
+```bash
+uv sync
+uv pip install -e .
+source .venv/bin/activate
+```
+
+## Install (using conda/mamba/micromamba)
 
 ### Create conda environment
 
@@ -25,15 +32,7 @@ conda activate carta-backend
 pip install -e .
 ```
 
-### Build protobuf (optional)
-
-This step can be skipped since the compiled protobuf files are already in `carta_backend/proto/`.
-
-```bash
-./build_proto.sh
-```
-
-# Download CARTA frontend
+## Download CARTA frontend
 
 ```bash
 cd ..
@@ -46,7 +45,7 @@ tar zxvf carta-frontend-5.0.0.tgz
 ## Run CARTA
 
 ```bash
-# <frontend_folder> should point to /some/path/cart-frontend-5.0.0/package/build
+# <frontend_folder> should point to /some/path/carta-frontend-5.0.0/package/build
 carta-backend --frontend_folder <frontend_folder>
 ```
 
