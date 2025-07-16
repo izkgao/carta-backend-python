@@ -765,7 +765,6 @@ class Session:
         channel: int = 0,
         stokes: int = 0,
     ) -> None:
-        clog.debug("Use send_RasterTileData_v2")
         # Get tile data
         res = await self.fm.async_get_tile(
             file_id=file_id,
