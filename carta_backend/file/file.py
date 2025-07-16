@@ -343,11 +343,12 @@ class FileManager:
         if channel is None:
             channel = slice(0, full_channel_size)
         if isinstance(channel, slice):
-            channel.start = channel.start if channel.start is not None else 0
-            channel.stop = (
+            start = channel.start if channel.start is not None else 0
+            stop = (
                 channel.stop if channel.stop is not None else full_channel_size
             )
-            channel_size = channel.stop - channel.start
+            channel_size = stop - start
+            channel = slice(start, stop)
 
         if semaphore is None:
             semaphore = asyncio.Semaphore(max_workers)
