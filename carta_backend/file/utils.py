@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
 from itertools import product
 from pathlib import Path
 from typing import Optional, Tuple, Union
@@ -1134,117 +1133,13 @@ def get_fits_info(file_path: Union[str, Path], hdu_index: int = 0) -> Tuple:
     return shape, dtype, offset, header
 
 
-def read_zarr_slice(
-    file_path: Union[str, Path],
-    time: slice | int | None = None,
-    frequency: slice | int | None = None,
-    polarization: slice | int | None = None,
-    ll: slice | int | None = None,
-    mm: slice | int | None = None,
-    max_workers: int = 2,
-) -> np.ndarray:
-    """
-    Read a slice of data from a Zarr file.
-
-    This function reads a slice of data from a Zarr file, taking into account
-    the chunking and compression of the data.
-
-    Parameters
-    ----------
-    file_path : Union[str, Path]
-        The path to the Zarr dataset directory.
-    time : slice | int | None, optional
-        The slice of time to read. Defaults to None (all).
-    frequency : slice | int | None, optional
-        The slice of frequency to read. Defaults to None (all).
-    polarization : slice | int | None, optional
-        The slice of polarization to read. Defaults to None (all).
-    ll : slice | int | None, optional
-        The slice of l to read. Defaults to None (all).
-    mm : slice | int | None, optional
-        The slice of m to read. Defaults to None (all).
-    max_workers : int, optional
-        The maximum number of workers to use for reading. Defaults to 2.
-
-    Returns
-    -------
-    np.ndarray
-        The slice of data read from the Zarr file.
-    """
-    if time is None:
-        time = slice(None)
-    if frequency is None:
-        frequency = slice(None)
-    if polarization is None:
-        polarization = slice(None)
-    if ll is None:
-        ll = slice(None)
-    if mm is None:
-        mm = slice(None)
-
-    file_path = Path(file_path)
-    shape, chunk_full_shape, dtype, order, comp_config = get_zarr_info(
-        file_path
-    )
-    slices = (time, frequency, polarization, ll, mm)
-    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
-
-    if comp_config is not None:
-        compressor = get_codec(comp_config)
-
-    result = np.empty(output_shape, dtype=dtype)
-
-    def read_and_insert(plan):
-        chunk_id = plan["chunk_id"]
-        chunk_slice = plan["chunk_slice"]
-        global_slice = plan["global_slice"]
-
-        chunk_filename = file_path / "SKY" / chunk_id
-        chunk_data = np.memmap(
-            chunk_filename,
-            mode="r",
-            shape=chunk_full_shape,
-            dtype=dtype,
-            order=order,
-        )
-        data_piece = chunk_data[chunk_slice]
-        result[global_slice] = data_piece
-
-    def decomp_read_and_insert(plan):
-        chunk_id = plan["chunk_id"]
-        chunk_slice = plan["chunk_slice"]
-        global_slice = plan["global_slice"]
-
-        chunk_filename = file_path / "SKY" / chunk_id
-
-        with open(chunk_filename, "rb") as f:
-            compressed = f.read()
-            decompressed = compressor.decode(compressed)
-
-        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
-            chunk_full_shape, order=order
-        )
-        data_piece = chunk_data[chunk_slice]
-        result[global_slice] = data_piece
-
-    if comp_config is not None:
-        func = decomp_read_and_insert
-    else:
-        func = read_and_insert
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        _ = list(executor.map(func, plans))
-
-    return np.squeeze(np.swapaxes(result, 3, 4))
-
-
 async def async_read_zarr_slice(
     file_path: Union[str, Path],
     time: slice | int | None = None,
-    frequency: slice | int | None = None,
-    polarization: slice | int | None = None,
-    ll: slice | int | None = None,
-    mm: slice | int | None = None,
+    channel: slice | int | None = None,
+    stokes: slice | int | None = None,
+    x: slice | int | None = None,
+    y: slice | int | None = None,
     dtype: np.dtype | None = None,
     semaphore: asyncio.Semaphore | None = None,
     max_workers: int = 4,
@@ -1261,14 +1156,14 @@ async def async_read_zarr_slice(
         The path to the Zarr dataset directory.
     time : slice | int | None, optional
         The slice of time to read. Defaults to None (all).
-    frequency : slice | int | None, optional
-        The slice of frequency to read. Defaults to None (all).
-    polarization : slice | int | None, optional
-        The slice of polarization to read. Defaults to None (all).
-    ll : slice | int | None, optional
-        The slice of l to read. Defaults to None (all).
-    mm : slice | int | None, optional
-        The slice of m to read. Defaults to None (all).
+    channel : slice | int | None, optional
+        The slice of channel to read. Defaults to None (all).
+    stokes : slice | int | None, optional
+        The slice of stokes to read. Defaults to None (all).
+    x : slice | int | None, optional
+        The slice of x to read. Defaults to None (all).
+    y : slice | int | None, optional
+        The slice of y to read. Defaults to None (all).
     dtype : np.dtype | None, optional
         The data type to convert the result to. If None, the original data
         type is used.
@@ -1283,16 +1178,32 @@ async def async_read_zarr_slice(
     np.ndarray
         The slice of data read from the Zarr file.
     """
+    if (
+        isinstance(channel, int)
+        and isinstance(stokes, int)
+        and isinstance(time, int)
+    ):
+        return await async_read_zarr_channel(
+            file_path=file_path,
+            channel=channel,
+            stokes=stokes,
+            time=time,
+            dtype=dtype,
+            semaphore=semaphore,
+            max_workers=max_workers,
+        )
+
     if time is None:
         time = slice(None)
-    if frequency is None:
-        frequency = slice(None)
-    if polarization is None:
-        polarization = slice(None)
-    if ll is None:
-        ll = slice(None)
-    if mm is None:
-        mm = slice(None)
+    if channel is None:
+        channel = slice(None)
+    if stokes is None:
+        stokes = slice(None)
+    if x is None:
+        x = slice(None)
+    if y is None:
+        y = slice(None)
+
     output_dtype = dtype
 
     file_path = Path(file_path)
@@ -1303,7 +1214,7 @@ async def async_read_zarr_slice(
         order,
         comp_config,
     ) = await async_get_zarr_info(file_path)
-    slices = (time, frequency, polarization, ll, mm)
+    slices = (time, channel, stokes, x, y)
     plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
 
     if comp_config is not None:
@@ -1373,99 +1284,12 @@ async def async_read_zarr_slice(
     return result
 
 
-def read_zarr_channel(
-    file_path: Union[str, Path],
-    frequency: int,
-    polarization: int,
-    time: int = 0,
-    max_workers: int = 2,
-) -> np.ndarray:
-    """
-    Read a channel from a Zarr file.
-
-    This function reads a channel from a Zarr file, taking into account
-    the chunking and compression of the data.
-
-    Parameters
-    ----------
-    file_path : Union[str, Path]
-        The path to the Zarr dataset directory.
-    frequency : int
-        The frequency index to read.
-    polarization : int
-        The polarization index to read.
-    time : int, optional
-        The time index to read. Defaults to 0.
-    max_workers : int, optional
-        The maximum number of workers to use for reading. Defaults to 2.
-
-    Returns
-    -------
-    np.ndarray
-        The channel read from the Zarr file.
-    """
-
-    ll = slice(None)
-    mm = slice(None)
-
-    file_path = Path(file_path)
-    shape, chunk_full_shape, dtype, order, comp_config = get_zarr_info(
-        file_path
-    )
-
-    if comp_config is not None:
-        compressor = get_codec(comp_config)
-    else:
-        return read_zarr_slice(
-            file_path,
-            time=time,
-            frequency=frequency,
-            polarization=polarization,
-            ll=ll,
-            mm=mm,
-        )
-
-    slices = (time, frequency, polarization, ll, mm)
-    plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
-
-    result = np.empty(output_shape[-2:], dtype=dtype)
-
-    def decomp_read_and_insert(plan):
-        chunk_id = plan["chunk_id"]
-        chunk_slice = plan["chunk_slice"]
-        global_slice = plan["global_slice"]
-        channel_chunk_slice = tuple(i for i in chunk_slice[-2:])
-        channel_global_slice = tuple(i for i in global_slice[-2:])
-
-        layer_shape = chunk_full_shape[-2:]
-
-        chunk_filename = file_path / "SKY" / chunk_id
-
-        start = np.ravel_multi_index(
-            (0, chunk_slice[1].start, 0, 0, 0), chunk_full_shape, order=order
-        )
-        nitems = np.prod(layer_shape)
-
-        with open(chunk_filename, "rb") as f:
-            compressed = f.read()
-            decompressed = compressor.decode_partial(compressed, start, nitems)
-
-        chunk_data = np.frombuffer(decompressed, dtype=dtype).reshape(
-            layer_shape, order=order
-        )
-        data_piece = chunk_data[channel_chunk_slice]
-        result[channel_global_slice] = data_piece
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        _ = list(executor.map(decomp_read_and_insert, plans))
-
-    return np.swapaxes(result, 0, 1)
-
-
 async def async_read_zarr_channel(
     file_path: Union[str, Path],
-    frequency: int,
-    polarization: int,
+    channel: int,
+    x: int | slice | None = None,
+    y: int | slice | None = None,
+    stokes: int = 0,
     time: int = 0,
     dtype: np.dtype | None = None,
     semaphore: asyncio.Semaphore | None = None,
@@ -1481,10 +1305,14 @@ async def async_read_zarr_channel(
     ----------
     file_path : Union[str, Path]
         The path to the Zarr dataset directory.
-    frequency : int
-        The frequency index to read.
-    polarization : int
-        The polarization index to read.
+    channel : int
+        The channel index to read.
+    x : int | slice | None, optional
+        The x index to read. Defaults to None.
+    y : int | slice | None, optional
+        The y index to read. Defaults to None.
+    stokes : int
+        The stokes index to read.
     time : int, optional
         The time index to read. Defaults to 0.
     dtype : np.dtype | None, optional
@@ -1502,8 +1330,8 @@ async def async_read_zarr_channel(
         The channel read from the Zarr file.
     """
 
-    ll = slice(None)
-    mm = slice(None)
+    x = slice(None) if x is None else x
+    y = slice(None) if y is None else y
 
     output_dtype = dtype
 
@@ -1522,7 +1350,7 @@ async def async_read_zarr_channel(
     if semaphore is None:
         semaphore = asyncio.Semaphore(max_workers)
 
-    slices = (time, frequency, polarization, ll, mm)
+    slices = (time, channel, stokes, x, y)
     plans, output_shape = get_chunk_read_plan(shape, chunk_full_shape, slices)
 
     result = np.empty(output_shape[-2:], dtype=dtype)

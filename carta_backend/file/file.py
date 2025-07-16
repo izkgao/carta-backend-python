@@ -168,8 +168,8 @@ class FileManager:
                 data = await async_read_zarr_channel(
                     file_path=file_path,
                     time=time,
-                    frequency=channel,
-                    polarization=stokes,
+                    channel=channel,
+                    stokes=stokes,
                 )
 
         # Convert to float32 to avoid using dtype >f4
@@ -392,10 +392,10 @@ class FileManager:
             data = await async_read_zarr_slice(
                 file_path=file_path,
                 time=time,
-                frequency=channel,
-                polarization=stokes,
-                ll=x,
-                mm=y,
+                channel=channel,
+                stokes=stokes,
+                x=x,
+                y=y,
                 dtype=dtype,
                 semaphore=semaphore,
             )
@@ -480,10 +480,10 @@ class FileManager:
             data = await async_read_zarr_slice(
                 file_path=file_path,
                 time=time,
-                frequency=channel,
-                polarization=stokes,
-                ll=x,
-                mm=y,
+                channel=channel,
+                stokes=stokes,
+                x=x,
+                y=y,
                 dtype=dtype,
                 semaphore=semaphore,
             )
