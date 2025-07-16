@@ -105,9 +105,6 @@ class Session:
         self.tile_futures = {}
         self.priority_counter = itertools.count()
 
-        # Channel & Stokes
-        self.channel_stokes = [0, 0]
-
         # SpectralRequirements
         self.spec_prof_on = False
         self.spec_prof_cursor_on = False
@@ -805,7 +802,8 @@ class Session:
 
         # Update channel and stokes
         async with self.lock:
-            self.channel_stokes = [channel, stokes]
+            self.fm.files[file_id].channel = channel
+            self.fm.files[file_id].stokes = stokes
 
         # RegionHistogramData
         await self.send_RegionHistogramData(
@@ -837,6 +835,10 @@ class Session:
         file_id = obj.file_id
         region_id = obj.region_id
         spatial_profiles = obj.spatial_profiles
+
+        # Skip closed file
+        if file_id not in self.fm.files:
+            return None
 
         # Not implemented for regions yet
         if region_id > 0:
@@ -881,7 +883,8 @@ class Session:
                 # Read parameters needed for sending within the lock
                 sprx = self.fm.files[file_id].spat_req["x"]
                 spry = self.fm.files[file_id].spat_req["y"]
-                channel, stokes = self.channel_stokes
+                channel = self.fm.files[file_id].channel
+                stokes = self.fm.files[file_id].stokes
                 params_for_sending = {
                     "x": x,
                     "y": y,
@@ -934,7 +937,8 @@ class Session:
             self.fm.files[file_id].cursor_coords = [x, y, cursor_token]
             sprx = self.fm.files[file_id].spat_req["x"]
             spry = self.fm.files[file_id].spat_req["y"]
-            channel, stokes = self.channel_stokes
+            channel = self.fm.files[file_id].channel
+            stokes = self.fm.files[file_id].stokes
 
             params_for_sending = {
                 "slice_x": slice(sprx["start"], sprx["end"]),

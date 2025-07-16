@@ -68,12 +68,17 @@ class FileData:
     cursor_coords: List[int | None]
     # Dict of axes with xradio style keys
     axes_dict: Dict[str, int] | None
+    # Current channel
+    channel: int = 0
+    # Current stokes
+    stokes: int = 0
+    # Current time
+    time: int = 0
 
 
 class FileManager:
     def __init__(self, client=None):
         self.files = {}
-        self.cache = {}
         self.channel_cache = {}
         self.client = client
 
@@ -533,6 +538,11 @@ class FileManager:
         stats = await asyncio.to_thread(_get_stats, data)
         return stats
 
+    def _clear_cache(self, cache_dict, file_id):
+        for key in list(cache_dict.keys()):
+            if key.startswith(str(file_id)):
+                del cache_dict[key]
+
     def close(self, file_id):
         """Remove a file from the manager."""
         if file_id in self.files:
@@ -541,9 +551,7 @@ class FileManager:
                 self.files[file_id].data.close()
             del self.files[file_id]
             # Clear cache
-            for key in list(self.cache.keys()):
-                if key.startswith(str(file_id)):
-                    del self.cache[key]
+            self._clear_cache(self.channel_cache, file_id)
         elif file_id == -1:
             for file_id in list(self.files.keys()):
                 clog.debug(f"Closing file ID '{file_id}'.")
@@ -551,16 +559,14 @@ class FileManager:
                     self.files[file_id].data.close()
                 del self.files[file_id]
                 # Clear cache
-                for key in list(self.cache.keys()):
-                    if key.startswith(str(file_id)):
-                        del self.cache[key]
+                self._clear_cache(self.channel_cache, file_id)
         else:
             clog.debug(f"File ID '{file_id}' not found.")
 
     def clear(self):
         """Remove all managed files."""
         self.files.clear()
-        self.cache.clear()
+        self.channel_cache.clear()
 
 
 def get_fits_FileData(file_id, file_path, hdu_index):
