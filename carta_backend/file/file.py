@@ -3,7 +3,7 @@ import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any, Dict, List, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Tuple
 
 import dask.array as da
 import numpy as np
@@ -27,7 +27,15 @@ from carta_backend.file.utils import (
 )
 from carta_backend.log import logger
 from carta_backend.region.utils import numba_stats_2d
-from carta_backend.tile import layer_to_mip
+from carta_backend.tile import (
+    compress_tile,
+    decode_tile_coord,
+    fill_nan_with_block_average,
+    get_nan_encodings_block,
+    get_tile_original_slice,
+    get_tile_slice,
+    layer_to_mip,
+)
 
 clog = logger.bind(name="CARTA")
 pflog = logger.bind(name="Performance")
@@ -80,6 +88,7 @@ class FileManager:
     def __init__(self, client=None):
         self.files = {}
         self.channel_cache = {}
+        self.tile_cache = {}
         self.client = client
 
         self.avail_mem = (
@@ -173,10 +182,10 @@ class FileManager:
                 )
 
         # Convert to float32 to avoid using dtype >f4
-        t0 = perf_counter_ns()
-
         if isinstance(data, np.ndarray):
+            data = np.asarray(data)
             if data.dtype != np.float32:
+                t0 = perf_counter_ns()
                 data = data.astype(np.float32, copy=False)
                 dt = (perf_counter_ns() - t0) / 1e6
                 msg = f"Converted to float32 in {dt:.3f} ms"
@@ -333,6 +342,12 @@ class FileManager:
             y = slice(None)
         if channel is None:
             channel = slice(0, full_channel_size)
+        if isinstance(channel, slice):
+            channel.start = channel.start if channel.start is not None else 0
+            channel.stop = (
+                channel.stop if channel.stop is not None else full_channel_size
+            )
+            channel_size = channel.stop - channel.start
 
         if semaphore is None:
             semaphore = asyncio.Semaphore(max_workers)
@@ -357,36 +372,39 @@ class FileManager:
                 memmap_info = self.files[file_id].memmap_info
                 memmap = np.memmap(**memmap_info)
 
-            if channel.start is None:
-                start = 0
-            else:
-                start = channel.start
-            if channel.stop is None:
-                stop = full_channel_size
-            else:
-                stop = channel.stop
-            channel_size = stop - start
-
-            async def load_chunk(i):
-                ichannel = slice(
-                    start + i * channel_size // n_jobs,
-                    start + (i + 1) * channel_size // n_jobs,
+            if isinstance(channel, int):
+                data = await asyncio.to_thread(
+                    load_data,
+                    data=memmap,
+                    x=x,
+                    y=y,
+                    channel=channel,
+                    stokes=stokes,
+                    wcs=wcs,
+                    dtype=dtype,
                 )
-                async with semaphore:
-                    return await asyncio.to_thread(
-                        load_data,
-                        data=memmap,
-                        x=x,
-                        y=y,
-                        channel=ichannel,
-                        stokes=stokes,
-                        wcs=wcs,
-                        dtype=dtype,
-                    )
+            else:
 
-            tasks = [load_chunk(i) for i in range(n_jobs)]
-            results = await asyncio.gather(*tasks)
-            data = np.concatenate(results, axis=0)
+                async def load_chunk(i):
+                    ichannel = slice(
+                        channel.start + i * channel_size // n_jobs,
+                        channel.start + (i + 1) * channel_size // n_jobs,
+                    )
+                    async with semaphore:
+                        return await asyncio.to_thread(
+                            load_data,
+                            data=memmap,
+                            x=x,
+                            y=y,
+                            channel=ichannel,
+                            stokes=stokes,
+                            wcs=wcs,
+                            dtype=dtype,
+                        )
+
+                tasks = [load_chunk(i) for i in range(n_jobs)]
+                results = await asyncio.gather(*tasks)
+                data = np.concatenate(results, axis=0)
         elif file_type == CARTA.FileType.CASA:
             file_path = self.files[file_id].file_path
             data = await async_read_zarr_slice(
@@ -400,6 +418,448 @@ class FileManager:
                 semaphore=semaphore,
             )
         return data
+
+    async def async_get_tile(
+        self,
+        file_id: str,
+        tile: int,
+        compression_type: CARTA.CompressionType,
+        compression_quality: int,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        n_jobs: int = 4,
+        use_dask: bool = False,
+    ):
+        x, y, layer = decode_tile_coord(tile)
+        image_shape = self.files[file_id].img_shape
+        mip = layer_to_mip(layer, image_shape=image_shape)
+
+        # Check tile cache
+        name = f"{file_id}_{channel}_{stokes}_{time}_{x}_{y}_{layer}"
+        if name in self.tile_cache:
+            clog.debug(f"Using cached tile for {name}")
+            return self.tile_cache[name]
+
+        # Check channel cache
+        layer_name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+        frame_name = f"{file_id}_{channel}_{stokes}_{time}"
+        if layer_name in self.channel_cache:
+            # From downsampled data
+            data = self.channel_cache[layer_name]
+            slicey, slicex = get_tile_slice(x, y, layer, image_shape)
+            tile_data = data[slicey, slicex]
+        else:
+            # From full frame data
+            if frame_name in self.channel_cache:
+                # From cache
+                data = self.channel_cache[frame_name]
+                slicey, slicex = get_tile_original_slice(
+                    x, y, layer, image_shape
+                )
+                tile_data = data[slicey, slicex]
+            else:
+                # From file
+                slicey, slicex = get_tile_original_slice(
+                    x, y, layer, image_shape
+                )
+                tile_data = await self.async_get_slice(
+                    file_id=file_id,
+                    x=slicex,
+                    y=slicey,
+                    channel=channel,
+                    stokes=stokes,
+                    time=time,
+                    memmap=memmap,
+                    dtype=dtype,
+                    semaphore=semaphore,
+                    max_workers=max_workers,
+                    n_jobs=n_jobs,
+                    use_dask=use_dask,
+                )
+
+            # Downsample
+            if isinstance(tile_data, da.Array):
+                tile_data = da.coarsen(
+                    da.nanmean,
+                    tile_data,
+                    {0: mip, 1: mip},
+                    trim_excess=True,
+                )
+            else:
+                t0 = perf_counter_ns()
+                tile_data = await asyncio.to_thread(
+                    block_reduce_numba, tile_data, mip
+                )
+                dt = (perf_counter_ns() - t0) / 1e6
+                msg = f"Downsample {tile_data.shape[1]}x{tile_data.shape[0]} tile data in {dt:.3f} ms "
+                msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
+                pflog.debug(msg)
+
+        if isinstance(tile_data, da.Array):
+            tile_data = await self.client.compute(tile_data)
+
+        res = self._compute_tile(
+            tile_data,
+            compression_type,
+            compression_quality,
+        )
+
+        comp_data, precision, nan_encodings, tile_shape = res
+
+        # Cache tile
+        if name not in self.tile_cache:
+            self.tile_cache[name] = (
+                comp_data,
+                precision,
+                nan_encodings,
+                tile_shape,
+            )
+
+        return comp_data, precision, nan_encodings, tile_shape
+
+    def _compute_tile(
+        self,
+        tile_data: np.ndarray,
+        compression_type: CARTA.CompressionType,
+        compression_quality: int,
+    ):
+        # NaN encodings
+        t0 = perf_counter_ns()
+        tile_height, tile_width = tile_data.shape
+        nan_encodings = get_nan_encodings_block(tile_data).tobytes()
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Get nan encodings in {dt:.3f} ms"
+        pflog.debug(msg)
+
+        # Fill NaNs
+        t0 = perf_counter_ns()
+        tile_data = fill_nan_with_block_average(tile_data)
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Fill NaN with block average in {dt:.3f} ms"
+        pflog.debug(msg)
+
+        # Compress data
+        t0 = perf_counter_ns()
+
+        comp_data, precision = compress_tile(
+            tile_data, compression_type, compression_quality
+        )
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
+        msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        pflog.debug(msg)
+
+        return comp_data, precision, nan_encodings, tile_data.shape
+
+    async def async_get_tiles(
+        self,
+        file_id: str,
+        tiles: List[int],
+        compression_type: CARTA.CompressionType,
+        compression_quality: int,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        n_jobs: int = 4,
+        use_dask: bool = False,
+    ):
+        coord_dict = {tile: decode_tile_coord(tile) for tile in tiles}
+        tile_dict = {}
+
+        # Check tile cache
+        for tile, coord in coord_dict.items():
+            x, y, layer = coord
+            name = f"{file_id}_{channel}_{stokes}_{time}_{x}_{y}_{layer}"
+            if name in self.tile_cache:
+                clog.debug(f"Using cached tile for {name}")
+                tile_dict[tile] = self.tile_cache[name]
+                del coord_dict[tile]
+
+        # Check if all tiles are in the same layer
+        coords_arr = np.array(list(coord_dict.values()))
+        image_shape = self.files[file_id].img_shape
+        mip = layer_to_mip(coords_arr[0, 2], image_shape)
+        mip_name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+
+        if (
+            not np.all(coords_arr[:, 2] == coords_arr[0, 2])
+            or mip_name in self.channel_cache
+        ):
+            tasks = []
+            for tile, coord in coord_dict.items():
+                tasks.append(
+                    self.fm.async_get_tile(
+                        file_id=file_id,
+                        tile=tile,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        time=time,
+                        dtype=dtype,
+                        semaphore=semaphore,
+                        n_jobs=n_jobs,
+                    )
+                )
+            results = await asyncio.gather(*tasks)
+            for tile, ires in zip(coord_dict.keys(), results):
+                tile_dict[tile] = ires
+        else:
+            xmin = np.min(coords_arr[:, 0])
+            xmax = np.max(coords_arr[:, 0])
+            ymin = np.min(coords_arr[:, 1])
+            ymax = np.max(coords_arr[:, 1])
+            y_slice, x_slice = get_tile_original_slice(
+                xmin, ymin, layer, image_shape, tile_shape=TILE_SHAPE
+            )
+            y_sl_min = y_slice.start
+            x_sl_min = x_slice.start
+            y_slice, x_slice = get_tile_original_slice(
+                xmax, ymax, layer, image_shape, tile_shape=TILE_SHAPE
+            )
+            y_sl_max = y_slice.stop
+            x_sl_max = x_slice.stop
+            y_slice = slice(y_sl_min, y_sl_max)
+            x_slice = slice(x_sl_min, x_sl_max)
+
+            # Get data
+            frame_name = f"{file_id}_{channel}_{stokes}_{time}"
+            if frame_name in self.channel_cache.keys():
+                # From cache
+                data = self.channel_cache[frame_name]
+                data = data[y_slice, x_slice]
+            else:
+                # From file
+                data = await self.async_get_slice(
+                    file_id=file_id,
+                    x=x_slice,
+                    y=y_slice,
+                    channel=channel,
+                    stokes=stokes,
+                    time=time,
+                    memmap=memmap,
+                    dtype=dtype,
+                    semaphore=semaphore,
+                    max_workers=max_workers,
+                    n_jobs=n_jobs,
+                    use_dask=use_dask,
+                )
+
+            # Downsample
+            if isinstance(data, da.Array):
+                data = da.coarsen(
+                    da.nanmean,
+                    data,
+                    {0: mip, 1: mip},
+                    trim_excess=False,
+                )
+            else:
+                t0 = perf_counter_ns()
+                data = await asyncio.to_thread(block_reduce_numba, data, mip)
+                dt = (perf_counter_ns() - t0) / 1e6
+                msg = f"Downsample {data.shape[1]}x{data.shape[0]} data in {dt:.3f} ms "
+                msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+                pflog.debug(msg)
+
+            if isinstance(data, da.Array):
+                data = await self.client.compute(data)
+
+            for tile, coord in coord_dict.items():
+                x, y, layer = coord
+                y_slice, x_slice = get_tile_slice(
+                    x, y, layer, image_shape, tile_shape=TILE_SHAPE
+                )
+                # Compute tile
+                comp_data, precision, nan_encodings, tile_shape = (
+                    self._compute_tile(
+                        data[y_slice, x_slice],
+                        compression_type,
+                        compression_quality,
+                    )
+                )
+                # Cache tile
+                name = f"{file_id}_{channel}_{stokes}_{time}_{x}_{y}_{layer}"
+                self.tile_cache[name] = (
+                    comp_data,
+                    precision,
+                    nan_encodings,
+                    tile_shape,
+                )
+                tile_dict[tile] = (
+                    comp_data,
+                    precision,
+                    nan_encodings,
+                    tile_shape,
+                )
+
+        return tile_dict
+
+    async def async_tile_generator(
+        self,
+        file_id: str,
+        tiles: List[int],
+        compression_type: CARTA.CompressionType,
+        compression_quality: int,
+        channel: int,
+        stokes: int,
+        time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        n_jobs: int = 4,
+        use_dask: bool = False,
+    ) -> AsyncGenerator[Tuple[int, Any], None]:
+        coord_dict = {tile: decode_tile_coord(tile) for tile in tiles}
+
+        # Check tile cache and yield cached tiles immediately
+        remaining_coords = {}
+        for tile, coord in coord_dict.items():
+            x, y, layer = coord
+            name = f"{file_id}_{channel}_{stokes}_{time}_{x}_{y}_{layer}"
+            if name in self.tile_cache:
+                clog.debug(f"Using cached tile for {name}")
+                yield tile, self.tile_cache[name]
+            else:
+                remaining_coords[tile] = coord
+
+        if not remaining_coords:
+            return
+
+        coord_dict = remaining_coords
+
+        # Check if all tiles are in the same layer
+        coords_arr = np.array(list(coord_dict.values()))
+        image_shape = self.files[file_id].img_shape
+        mip = layer_to_mip(coords_arr[0, 2], image_shape)
+        mip_name = f"{file_id}_{channel}_{stokes}_{time}_{mip}"
+
+        if (
+            not np.all(coords_arr[:, 2] == coords_arr[0, 2])
+            or mip_name in self.channel_cache
+        ):
+            tasks = {}
+            for tile, coord in coord_dict.items():
+                task = asyncio.create_task(
+                    self.fm.async_get_tile(
+                        file_id=file_id,
+                        tile=tile,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        time=time,
+                        dtype=dtype,
+                        semaphore=semaphore,
+                        n_jobs=n_jobs,
+                    )
+                )
+                tasks[task] = tile
+
+            for future in asyncio.as_completed(tasks):
+                tile = tasks[future]
+                ires = await future
+                yield tile, ires
+        else:
+            xmin = np.min(coords_arr[:, 0])
+            xmax = np.max(coords_arr[:, 0])
+            ymin = np.min(coords_arr[:, 1])
+            ymax = np.max(coords_arr[:, 1])
+            y_slice, x_slice = get_tile_original_slice(
+                xmin, ymin, layer, image_shape, tile_shape=TILE_SHAPE
+            )
+            y_sl_min = y_slice.start
+            x_sl_min = x_slice.start
+            y_slice, x_slice = get_tile_original_slice(
+                xmax, ymax, layer, image_shape, tile_shape=TILE_SHAPE
+            )
+            y_sl_max = y_slice.stop
+            x_sl_max = x_slice.stop
+            y_slice = slice(y_sl_min, y_sl_max)
+            x_slice = slice(x_sl_min, x_sl_max)
+
+            # Get data
+            frame_name = f"{file_id}_{channel}_{stokes}_{time}"
+            if frame_name in self.channel_cache.keys():
+                # From cache
+                data = self.channel_cache[frame_name]
+                data = data[y_slice, x_slice]
+            else:
+                # From file
+                data = await self.async_get_slice(
+                    file_id=file_id,
+                    x=x_slice,
+                    y=y_slice,
+                    channel=channel,
+                    stokes=stokes,
+                    time=time,
+                    memmap=memmap,
+                    dtype=dtype,
+                    semaphore=semaphore,
+                    max_workers=max_workers,
+                    n_jobs=n_jobs,
+                    use_dask=use_dask,
+                )
+
+            # Downsample
+            if isinstance(data, da.Array):
+                data = da.coarsen(
+                    da.nanmean,
+                    data,
+                    {0: mip, 1: mip},
+                    trim_excess=False,
+                )
+            else:
+                t0 = perf_counter_ns()
+                data = await asyncio.to_thread(block_reduce_numba, data, mip)
+                dt = (perf_counter_ns() - t0) / 1e6
+                msg = f"Downsample {data.shape[1]}x{data.shape[0]} data in {dt:.3f} ms "
+                msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+                pflog.debug(msg)
+
+            if isinstance(data, da.Array):
+                data = await self.client.compute(data)
+
+            for tile, coord in coord_dict.items():
+                x, y, layer = coord
+                y_slice, x_slice = get_tile_slice(
+                    x, y, layer, image_shape, tile_shape=TILE_SHAPE
+                )
+                # Compute tile
+                comp_data, precision, nan_encodings, tile_shape = (
+                    self._compute_tile(
+                        data[y_slice, x_slice],
+                        compression_type,
+                        compression_quality,
+                    )
+                )
+                # Cache tile
+                name = f"{file_id}_{channel}_{stokes}_{time}_{x}_{y}_{layer}"
+                self.tile_cache[name] = (
+                    comp_data,
+                    precision,
+                    nan_encodings,
+                    tile_shape,
+                )
+                yield (
+                    tile,
+                    (
+                        comp_data,
+                        precision,
+                        nan_encodings,
+                        tile_shape,
+                    ),
+                )
 
     async def async_get_point_spectrum(
         self,

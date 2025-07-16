@@ -106,6 +106,25 @@ def get_tile_slice(x, y, layer, image_shape, tile_shape=(256, 256)):
     return y_slice, x_slice
 
 
+def get_tile_original_slice(x, y, layer, image_shape, tile_shape=(256, 256)):
+    # Calculate mip level (downsampling factor)
+    mip = layer_to_mip(layer, image_shape, tile_shape)
+
+    # Calculate starting positions in the original array
+    start_y = y * tile_shape[0] * mip
+    start_x = x * tile_shape[1] * mip
+
+    # Calculate ending positions (with bounds checking)
+    end_y = min(start_y + tile_shape[0] * mip, image_shape[0])
+    end_x = min(start_x + tile_shape[1] * mip, image_shape[1])
+
+    # Create slices
+    y_slice = slice(start_y, end_y)
+    x_slice = slice(start_x, end_x)
+
+    return y_slice, x_slice
+
+
 def get_nan_encodings_block(arr):
     # Based on https://gist.github.com/nvictus/66627b580c13068589957d6ab0919e66
     arr = np.isnan(arr).ravel()

@@ -9,7 +9,7 @@ import dask.array as da
 import numpy as np
 from aioitertools import iter
 from astropy.io import fits
-from dask.distributed import Client, as_completed
+from dask.distributed import Client
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
@@ -46,7 +46,6 @@ from carta_backend.tile import (
     compress_tile,
     decode_tile_coord,
     get_nan_encodings_block,
-    get_tile_slice,
 )
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
@@ -568,91 +567,95 @@ class Session:
         message = self.encode_message(event_type, request_id, resp_sync)
         self.queue.put_nowait(message)
 
-        priority = next(self.priority_counter)
-
-        # Cancel futures with lower priority
-        # async with self.lock:
-        #     for p in list(self.tile_futures.keys()):
-        #         if p < priority:
-        #             for future in list(self.tile_futures[p].keys()):
-        #                 await future.cancel()
-        #                 del future
-        #             del self.tile_futures[p]
-
         # RasterTileData
         t0 = perf_counter_ns()
-        if tiles is None or tiles[0] == 0:
-            # Send the entire image in full resolution
-            data = await self.fm.async_get_channel(file_id, channel, stokes)
-            if isinstance(data, da.Array):
-                data = await self.client.compute(data[:, :], priority=priority)
-            self.send_RasterTileData(
-                request_id=request_id,
-                file_id=file_id,
-                data=data,
-                compression_type=compression_type,
-                compression_quality=compression_quality,
-                channel=channel,
-                stokes=stokes,
+
+        tasks = []
+
+        for tile in tiles:
+            tasks.append(
+                self.send_RasterTileData_v2(
+                    request_id=request_id,
+                    file_id=file_id,
+                    tile=tile,
+                    compression_type=compression_type,
+                    compression_quality=compression_quality,
+                    channel=channel,
+                    stokes=stokes,
+                )
             )
-        else:
-            # Send tiles
-            layer = decode_tile_coord(tiles[0])[2]
-            data = await self.fm.async_get_channel_mip(
-                file_id=file_id,
-                channel=channel,
-                stokes=stokes,
-                layer=layer,
-            )
-            image_shape = self.fm.files[file_id].img_shape
 
-            if isinstance(data, da.Array):
-                futures = {}
+        await asyncio.gather(*tasks)
 
-                for tile in tiles:
-                    x, y, layer = decode_tile_coord(tile)
-                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
-                    future = self.client.compute(
-                        data[slicey, slicex], priority=priority
-                    )
-                    futures[future] = (x, y, layer)
+        # tasks = []
 
-                # async with self.lock:
-                #     self.tile_futures[priority] = futures
+        # tile_dict = await self.fm.async_get_tiles(
+        #     file_id=file_id,
+        #     tiles=tiles,
+        #     compression_type=compression_type,
+        #     compression_quality=compression_quality,
+        #     channel=channel,
+        #     stokes=stokes,
+        #     time=0,
+        #     dtype=np.float32,
+        #     semaphore=self.semaphore,
+        #     n_jobs=N_JOBS,
+        #     use_dask=self.use_dask,
+        # )
 
-                async for future in as_completed(futures):
-                    x, y, layer = futures[future]
-                    self.send_RasterTileData(
-                        request_id=request_id,
-                        file_id=file_id,
-                        data=await future,
-                        compression_type=compression_type,
-                        compression_quality=compression_quality,
-                        channel=channel,
-                        stokes=stokes,
-                        x=x,
-                        y=y,
-                        layer=layer,
-                    )
-            else:
-                # NumPy array
-                async for tile in iter(tiles):
-                    x, y, layer = decode_tile_coord(tile)
-                    slicey, slicex = get_tile_slice(x, y, layer, image_shape)
-                    idata = data[slicey, slicex]
-                    self.send_RasterTileData(
-                        request_id=request_id,
-                        file_id=file_id,
-                        data=idata,
-                        compression_type=compression_type,
-                        compression_quality=compression_quality,
-                        channel=channel,
-                        stokes=stokes,
-                        x=x,
-                        y=y,
-                        layer=layer,
-                    )
-                    await asyncio.sleep(0)
+        # for tile, ires in tile_dict.items():
+        #     comp_data, precision, nan_encodings, tile_shape = ires
+        #     tasks.append(
+        #         self.send_RasterTileData_v3(
+        #             request_id=request_id,
+        #             file_id=file_id,
+        #             tile=tile,
+        #             comp_data=comp_data,
+        #             precision=precision,
+        #             nan_encodings=nan_encodings,
+        #             tile_shape=tile_shape,
+        #             compression_type=compression_type,
+        #             compression_quality=compression_quality,
+        #             channel=channel,
+        #             stokes=stokes,
+        #         )
+        #     )
+
+        # await asyncio.gather(*tasks)
+
+        # tasks = []
+
+        # async for tile, ires in self.fm.async_tile_generator(
+        #     file_id=file_id,
+        #     tiles=tiles,
+        #     compression_type=compression_type,
+        #     compression_quality=compression_quality,
+        #     channel=channel,
+        #     stokes=stokes,
+        #     time=0,
+        #     dtype=np.float32,
+        #     semaphore=self.semaphore,
+        #     n_jobs=N_JOBS,
+        #     use_dask=self.use_dask,
+        # ):
+        #     comp_data, precision, nan_encodings, tile_shape = ires
+        #     tasks.append(
+        #         self.send_RasterTileData_v3(
+        #             request_id=request_id,
+        #             file_id=file_id,
+        #             tile=tile,
+        #             comp_data=comp_data,
+        #             precision=precision,
+        #             nan_encodings=nan_encodings,
+        #             tile_shape=tile_shape,
+        #             compression_type=compression_type,
+        #             compression_quality=compression_quality,
+        #             channel=channel,
+        #             stokes=stokes,
+        #         )
+        #     )
+
+        # await asyncio.gather(*tasks)
 
         dt = (perf_counter_ns() - t0) / 1e6
 
@@ -741,6 +744,124 @@ class Session:
             tile.y = y
         if layer is not None:
             tile.layer = layer
+
+        resp_data.tiles.append(tile)
+
+        # Send message
+        event_type = CARTA.EventType.RASTER_TILE_DATA
+        message = self.encode_message(event_type, request_id, resp_data)
+        self.queue.put_nowait(message)
+
+        return None
+
+    async def send_RasterTileData_v2(
+        self,
+        request_id: int,
+        file_id: int,
+        tile: int,
+        compression_type: int,
+        compression_quality: int,
+        channel: int = 0,
+        stokes: int = 0,
+    ) -> None:
+        clog.debug("Use send_RasterTileData_v2")
+        # Get tile data
+        res = await self.fm.async_get_tile(
+            file_id=file_id,
+            tile=tile,
+            compression_type=compression_type,
+            compression_quality=compression_quality,
+            channel=channel,
+            stokes=stokes,
+            time=0,
+            dtype=np.float32,
+            semaphore=self.semaphore,
+            n_jobs=N_JOBS,
+            use_dask=self.use_dask,
+        )
+
+        comp_data, precision, nan_encodings, tile_shape = res
+
+        x, y, layer = decode_tile_coord(tile)
+        tile_height, tile_width = tile_shape
+
+        if precision > compression_quality:
+            pflog.debug(
+                f"Upgraded precision to {precision} "
+                f"(originally requested precision: {compression_quality})."
+            )
+
+        # RasterTileData
+        resp_data = CARTA.RasterTileData()
+        resp_data.file_id = file_id
+        resp_data.channel = channel
+        resp_data.stokes = stokes
+        resp_data.compression_type = compression_type
+        resp_data.compression_quality = precision
+        resp_data.sync_id = file_id + 1
+        # resp_data.animation_id = 0
+
+        tile = CARTA.TileData()
+        tile.width = tile_width
+        tile.height = tile_height
+        tile.image_data = comp_data
+        tile.nan_encodings = nan_encodings
+        tile.x = x
+        tile.y = y
+        tile.layer = layer
+
+        resp_data.tiles.append(tile)
+
+        # Send message
+        event_type = CARTA.EventType.RASTER_TILE_DATA
+        message = self.encode_message(event_type, request_id, resp_data)
+        self.queue.put_nowait(message)
+
+        return None
+
+    async def send_RasterTileData_v3(
+        self,
+        request_id: int,
+        file_id: int,
+        tile: int,
+        comp_data: np.ndarray,
+        precision: int,
+        nan_encodings: np.ndarray,
+        tile_shape: Tuple[int, int],
+        compression_type: int,
+        compression_quality: int,
+        channel: int = 0,
+        stokes: int = 0,
+    ) -> None:
+        clog.debug("Use send_RasterTileData_v3")
+
+        x, y, layer = decode_tile_coord(tile)
+        tile_height, tile_width = tile_shape
+
+        if precision > compression_quality:
+            pflog.debug(
+                f"Upgraded precision to {precision} "
+                f"(originally requested precision: {compression_quality})."
+            )
+
+        # RasterTileData
+        resp_data = CARTA.RasterTileData()
+        resp_data.file_id = file_id
+        resp_data.channel = channel
+        resp_data.stokes = stokes
+        resp_data.compression_type = compression_type
+        resp_data.compression_quality = precision
+        resp_data.sync_id = file_id + 1
+        # resp_data.animation_id = 0
+
+        tile = CARTA.TileData()
+        tile.width = tile_width
+        tile.height = tile_height
+        tile.image_data = comp_data
+        tile.nan_encodings = nan_encodings
+        tile.x = x
+        tile.y = y
+        tile.layer = layer
 
         resp_data.tiles.append(tile)
 
