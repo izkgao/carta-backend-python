@@ -770,6 +770,9 @@ class Session:
         # This is to switch the event loop to send the histogram
         await asyncio.sleep(0)
 
+        channel = self.fm.files[file_id].channel
+        stokes = self.fm.files[file_id].stokes
+
         # RasterTile
         await self.send_RasterTileSync(
             request_id=0,
@@ -777,8 +780,8 @@ class Session:
             compression_type=compression_type,
             compression_quality=compression_quality,
             tiles=tiles,
-            channel=0,
-            stokes=0,
+            channel=channel,
+            stokes=stokes,
         )
 
         return None
