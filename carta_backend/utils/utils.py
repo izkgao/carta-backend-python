@@ -1,3 +1,4 @@
+import asyncio
 import os
 import platform
 import socket
@@ -6,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple
 
 import aiofiles.os
-from aioitertools import iter
 
 from carta_backend import proto as CARTA
 from carta_backend.log import logger
@@ -122,10 +122,11 @@ async def async_get_folder_size(path: str) -> int:
     total_size = 0
     for dirpath, _, filenames in os.walk(path):
         sizes = []
-        async for filename in iter(filenames):
+        for filename in filenames:
             sizes.append(
-                await aiofiles.os.path.getsize(os.path.join(dirpath, filename))
+                aiofiles.os.path.getsize(os.path.join(dirpath, filename))
             )
+        sizes = await asyncio.gather(*sizes)
         total_size += sum(sizes)
     return total_size
 

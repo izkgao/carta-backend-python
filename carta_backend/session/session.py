@@ -7,7 +7,6 @@ from typing import Any, Optional, Tuple
 
 import dask.array as da
 import numpy as np
-from aioitertools import iter
 from astropy.io import fits
 from dask.distributed import Client
 from xarray import open_zarr
@@ -275,7 +274,7 @@ class Session:
         items = os.listdir(directory)
 
         try:
-            async for item in iter(items):
+            for item in items:
                 # Check if operation was cancelled
                 async with self.lock:
                     if self.flag_stop_file_list:
@@ -307,7 +306,7 @@ class Session:
                         continue
                     # Treat .zarr folder as a file
                     elif item.endswith(".zarr"):
-                        file_info = await async_get_file_info(item_path)
+                        file_info = async_get_file_info(item_path)
                         files.append(file_info)
                     else:
                         dir_info = get_directory_info(item_path)
@@ -327,8 +326,10 @@ class Session:
                     elif extension not in extensions:
                         continue
 
-                    file_info = await async_get_file_info(item_path)
+                    file_info = async_get_file_info(item_path)
                     files.append(file_info)
+
+            files = await asyncio.gather(*files)
 
             response.files.extend(files)
             response.subdirectories.extend(subdirectories)
@@ -1784,7 +1785,7 @@ class Session:
         items = os.listdir(directory)
 
         try:
-            async for item in iter(items):
+            for item in items:
                 # Full path of item
                 item_path = directory / item
 
@@ -1815,8 +1816,10 @@ class Session:
                     if file_type == CARTA.FileType.UNKNOWN:
                         continue
 
-                    file_info = await async_get_file_info(item_path, file_type)
+                    file_info = async_get_file_info(item_path, file_type)
                     files.append(file_info)
+
+            files = await asyncio.gather(*files)
 
             resp.files.extend(files)
             resp.subdirectories.extend(subdirectories)
