@@ -32,8 +32,9 @@ def numba_histogram_single(data, bin_edges):
     return hist
 
 
-@njit((nb.int64[:](nb.float32[:], nb.float32[:])),
-      parallel=True, fastmath=True)
+@njit(
+    (nb.int64[:](nb.float32[:], nb.float32[:])), parallel=True, fastmath=True
+)
 def numba_histogram(data, bin_edges):
     # Precompute constants
     n_bins = bin_edges.size - 1
@@ -88,7 +89,8 @@ async def get_histogram_dask(data, client: Client):
 
     # Calculate histogram
     res = client.compute(
-        da.histogram(data, bins=nbins, range=[bin_min, bin_max]))
+        da.histogram(data, bins=nbins, range=[bin_min, bin_max])
+    )
     hist, bin_edges = await client.gather(res)
     bin_width = bin_edges[1] - bin_edges[0]
     bin_centers = bin_edges[:-1] + bin_width / 2
@@ -112,10 +114,10 @@ async def get_histogram_numpy(data: np.ndarray) -> CARTA.Histogram:
     # Calculate bin range
     bin_min, bin_max = np.nanmin(data), np.nanmax(data)
     bin_width = (bin_max - bin_min) / nbins
-    bin_edges = np.linspace(bin_min, bin_max, nbins + 1, dtype='float32')
+    bin_edges = np.linspace(bin_min, bin_max, nbins + 1, dtype=np.float32)
 
     # Calculate histogram
-    data = data.astype('float32').ravel()
+    data = data.ravel()
     if data.size <= 1024**2:
         hist = numba_histogram_single(data, bin_edges)
     else:
@@ -135,8 +137,8 @@ async def get_histogram_numpy(data: np.ndarray) -> CARTA.Histogram:
 
 
 async def get_histogram(
-        data: da.Array | np.ndarray, client: Client
-        ) -> CARTA.Histogram:
+    data: da.Array | np.ndarray, client: Client
+) -> CARTA.Histogram:
     if isinstance(data, da.Array):
         clog.debug("Using dask histogram")
         return await get_histogram_dask(data, client)
