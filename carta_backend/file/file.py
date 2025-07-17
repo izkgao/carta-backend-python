@@ -88,12 +88,11 @@ class FileData:
 
 
 class FileManager:
-    def __init__(self, client=None, use_dask: bool = False):
+    def __init__(self, client=None):
         self.files = {}
         self.channel_cache = {}
         self.tile_cache = {}
         self.client = client
-        self.use_dask = use_dask
 
         self.avail_mem = (
             psutil.virtual_memory().available / 1024**2
@@ -111,8 +110,6 @@ class FileManager:
         elif file_type == CARTA.FileType.CASA:
             filedata = await get_zarr_FileData(file_id, file_path, self.client)
 
-        filedata.use_dask = self.use_dask
-
         self.files[file_id] = filedata
 
     async def async_get_channel(
@@ -121,6 +118,12 @@ class FileManager:
         channel: int,
         stokes: int,
         time: int = 0,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        use_dask: bool = False,
+        return_future: bool = False,
     ):
         # Generate names
         name = f"{file_id}_{channel}_{stokes}_{time}_1"
@@ -143,24 +146,22 @@ class FileManager:
         # load the full frame into memory
         frame_size_mib = self.files[file_id].frame_size_mib
         if frame_size_mib > (self.avail_mem * 0.25):
-            if not self.use_dask:
+            if not use_dask:
                 clog.warning(
                     f"Frame size {frame_size_mib / 1024:.2f} GiB is greater "
                     f"than 25% of available memory {self.avail_mem / 1024:.2f} "
                     "GiB, falling back to use Dask as the compute backend for "
                     "this file."
                 )
-            use_dask = True
-        else:
-            use_dask = False
+                use_dask = True
 
-        self.files[file_id].use_dask |= use_dask
+        self.files[file_id].use_dask = use_dask
 
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
 
-        if self.files[file_id].use_dask:
+        if use_dask:
             # Can be FITS or Zarr
             clog.debug("Using dask to load channel")
             _data = self.files[file_id].dask_channels
@@ -172,20 +173,23 @@ class FileManager:
                 stokes=stokes,
                 time=time,
                 wcs=wcs,
+                dtype=dtype,
             )
         else:
             if file_type == CARTA.FileType.FITS:
-                memmap_info = self.files[file_id].memmap_info
-                _data = np.memmap(**memmap_info)
+                if memmap is None:
+                    memmap_info = self.files[file_id].memmap_info
+                    memmap = np.memmap(**memmap_info)
                 data = await asyncio.to_thread(
                     load_data,
-                    data=_data,
+                    data=memmap,
                     x=None,
                     y=None,
                     channel=channel,
                     stokes=stokes,
                     time=time,
                     wcs=wcs,
+                    dtype=dtype,
                 )
             elif file_type == CARTA.FileType.CASA:
                 file_path = self.files[file_id].file_path
@@ -194,6 +198,9 @@ class FileManager:
                     time=time,
                     channel=channel,
                     stokes=stokes,
+                    dtype=dtype,
+                    semaphore=semaphore,
+                    max_workers=max_workers,
                 )
 
         # Convert to float32 to avoid using dtype >f4
@@ -207,6 +214,8 @@ class FileManager:
                 clog.debug(msg)
         else:
             data = data.astype(np.float32, copy=False)
+            if not return_future:
+                data = await self.client.compute(data)
 
         # Cache data (including dask array)
         self.channel_cache[name] = data
@@ -220,6 +229,12 @@ class FileManager:
         time: int = 0,
         layer: int | None = None,
         mip: int = 1,
+        memmap: np.memmap | None = None,
+        dtype: np.dtype | None = None,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        use_dask: bool = False,
+        return_future: bool = False,
     ):
         # Convert layer to mip
         if layer is not None:
@@ -235,6 +250,12 @@ class FileManager:
                 channel=channel,
                 stokes=stokes,
                 time=time,
+                memmap=memmap,
+                dtype=dtype,
+                semaphore=semaphore,
+                max_workers=max_workers,
+                use_dask=use_dask,
+                return_future=return_future,
             )
 
         # Generate names
@@ -252,6 +273,12 @@ class FileManager:
                 channel=channel,
                 stokes=stokes,
                 time=time,
+                memmap=memmap,
+                dtype=dtype,
+                semaphore=semaphore,
+                max_workers=max_workers,
+                use_dask=use_dask,
+                return_future=return_future,
             )
 
         # Downsample data

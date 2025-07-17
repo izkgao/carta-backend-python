@@ -90,7 +90,7 @@ class Session:
         self.lock = lock or asyncio.Lock()
         self.client = client
         self.use_dask = use_dask
-        self.fm = FileManager(client, use_dask=self.use_dask)
+        self.fm = FileManager(client)
 
         # Set up message queue
         self.queue = asyncio.Queue()
@@ -443,6 +443,7 @@ class Session:
 
         # Open file
         await self.fm.open(file_id, file_path, hdu_index)
+        self.fm.files[file_id].use_dask = self.use_dask
         header = self.fm.files[file_id].header
 
         # OpenFileAck
@@ -498,7 +499,21 @@ class Session:
         # Load image
         t0 = perf_counter_ns()
 
-        data = await self.fm.async_get_channel(file_id, channel, stokes)
+        data = await self.fm.async_get_channel(
+            file_id=file_id,
+            channel=channel,
+            stokes=stokes,
+            time=0,
+            memmap=None,
+            dtype=None,
+            semaphore=self.semaphore,
+            # Use self.use_dask instead of file.use_dask
+            # because file.use_dask may be changed after this
+            # according to the ratio of frame size to available memory
+            use_dask=self.use_dask,
+            # Return future for dask array only
+            return_future=True,
+        )
 
         dt = (perf_counter_ns() - t0) / 1e6
 
@@ -576,7 +591,7 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
 
-        use_dask = self.fm.files[file_id].use_dask | self.use_dask
+        use_dask = self.fm.files[file_id].use_dask
 
         if (
             use_dask
@@ -612,6 +627,8 @@ class Session:
                 stokes=stokes,
                 time=0,
                 layer=layer,
+                semaphore=self.semaphore,
+                use_dask=False,
             )
             read_dt = (perf_counter_ns() - t1) / 1e6
 
@@ -1178,8 +1195,15 @@ class Session:
 
         # Get data
         shape = self.fm.files[file_id].img_shape
+        use_dask = self.fm.files[file_id].use_dask
         data = await self.fm.async_get_channel_mip(
-            file_id, channel, stokes, mip=mip
+            file_id,
+            channel,
+            stokes,
+            mip=mip,
+            semaphore=self.semaphore,
+            use_dask=use_dask,
+            return_future=True,
         )
 
         start = [slice_x.start, slice_y.start]
@@ -1420,6 +1444,8 @@ class Session:
         # Initialize variable executor_task
         executor_task = None
 
+        use_dask = self.fm.files[file_id].use_dask
+
         while progress < 1.0:
             # Check if region changed
             if token is not None:
@@ -1437,7 +1463,7 @@ class Session:
             start = channel_slice.start
             stop = channel_size
 
-            if self.use_dask:
+            if use_dask:
                 if count == 8 and (stop - start) / delta_z > 3:
                     # If there are more than 3 chunks to process, process
                     # them in parallel and await the futures in later cycles
@@ -1459,7 +1485,7 @@ class Session:
                             channel=channel_slice,
                             stokes=stokes,
                             dtype=dtype,
-                            use_dask=self.use_dask,
+                            use_dask=True,
                             return_future=True,
                         )
                         future = get_spectral_profile_dask(data, region, hdr)
@@ -1475,7 +1501,7 @@ class Session:
                         channel=channel_slice,
                         stokes=stokes,
                         dtype=dtype,
-                        use_dask=self.use_dask,
+                        use_dask=True,
                         return_future=True,
                     )
                     part_spec_profs = get_spectral_profile_dask(
@@ -1496,7 +1522,7 @@ class Session:
                     dtype=dtype,
                     semaphore=self.semaphore,
                     n_jobs=N_JOBS,
-                    use_dask=self.use_dask,
+                    use_dask=False,
                 )
 
             spec_profiles[:, channel_slice] = part_spec_profs
@@ -1610,7 +1636,9 @@ class Session:
         else:
             dt_partial_update = TARGET_PARTIAL_REGION_TIME
 
-        if self.use_dask:
+        use_dask = self.fm.files[file_id].use_dask
+
+        if use_dask:
             clog.debug("Using Dask to load point spectrum")
 
         while progress < 1.0:
@@ -1641,7 +1669,7 @@ class Session:
                 dtype=dtype,
                 semaphore=self.semaphore,
                 n_jobs=N_JOBS,
-                use_dask=self.use_dask,
+                use_dask=use_dask,
             )
             spec_profile[channel_slice] = part_spec_prof
 
