@@ -616,6 +616,9 @@ class Session:
                 )
 
             await asyncio.gather(*tasks)
+
+            # Signal raster event
+            self.fm.files[file_id].raster_event.set()
         else:
             # All tiles
             clog.debug("Generate all tiles using full image")
