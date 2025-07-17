@@ -1089,22 +1089,19 @@ def get_fits_FileData(file_id, file_path, hdu_index, use_dask=False):
     msg = f"Create dask array in {dt:.3f} ms"
     clog.debug(msg)
 
-    if use_dask:
-        # Create dask channels
-        t0 = perf_counter_ns()
-        chunks = get_fits_dask_channels_chunks(wcs)
-        dask_channels = mmap_dask_array(
-            filename=file_path,
-            shape=shape,
-            dtype=dtype,
-            offset=offset,
-            chunks=chunks,
-        )
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Create dask channels array in {dt:.3f} ms"
-        clog.debug(msg)
-    else:
-        dask_channels = None
+    # Create dask channels
+    t0 = perf_counter_ns()
+    chunks = get_fits_dask_channels_chunks(wcs)
+    dask_channels = mmap_dask_array(
+        filename=file_path,
+        shape=shape,
+        dtype=dtype,
+        offset=offset,
+        chunks=chunks,
+    )
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Create dask channels array in {dt:.3f} ms"
+    clog.debug(msg)
 
     # Get and set image information
     header["PIX_AREA"] = np.abs(
