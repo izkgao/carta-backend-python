@@ -51,3 +51,8 @@ Changelog = "https://github.com/izkgao/carta-backend-python/README.md"
 
 [project.scripts]
 carta-backend = "carta_backend.main:main"
+
+[project.optional-dependencies]
+tests = [
+    "pytest>=8.4.1",
+]

@@ -1400,8 +1400,9 @@ class Session:
         dt_partial_update = TARGET_PARTIAL_REGION_TIME
         count = 0
 
-        # Get slices and region submask
-        slicex, slicey, sub_mask = get_region_slices_mask(region_info)
+        # Get slices and region submask for use_dask is False
+        image_shape = self.fm.files[file_id].img_shape
+        slicex, slicey, sub_mask = get_region_slices_mask(region, image_shape)
 
         # Initialize variable executor_task
         executor_task = None

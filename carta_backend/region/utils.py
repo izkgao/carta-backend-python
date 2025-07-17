@@ -67,24 +67,52 @@ def get_region(region_info):
         return None
 
 
-def get_region_slices_mask(region_info):
+def get_region_slices_mask(region, image_shape=None):
     # Currently rectangle only
-    reg = get_region(region_info)
-    if reg is None:
+    if region is None:
         return None
 
     # Get slices
-    bounds = shapely.bounds(reg)
+    bounds = shapely.bounds(region)
     x1, y1 = np.floor(bounds)[:2].astype(int)
     x2, y2 = np.ceil(bounds)[2:].astype(int)
-    slicex = slice(x1, x2)
-    slicey = slice(y1, y2)
+
+    if image_shape is not None:
+        x1_new = min(max(0, x1), image_shape[1])
+        y1_new = min(max(0, y1), image_shape[0])
+        x2_new = max(min(image_shape[1], x2), 0)
+        y2_new = max(min(image_shape[0], y2), 0)
+    else:
+        x1_new = x1
+        y1_new = y1
+        x2_new = x2
+        y2_new = y2
+    slicex = slice(x1_new, x2_new)
+    slicey = slice(y1_new, y2_new)
+    slicex_mask = slice(x1_new - x1, x2_new - x1)
+    slicey_mask = slice(y1_new - y1, y2_new - y1)
 
     # Make an array mask
     out_shape = (y2 - y1, x2 - x1)
+
+    # Handle zero-area regions or empty slices
+    if out_shape[0] <= 0 or out_shape[1] <= 0:
+        return slicex, slicey, np.array([], dtype=np.uint8).reshape(0, 0)
+
     mask = np.zeros(out_shape, dtype=np.uint8)
-    rasterize([reg], out=mask, transform=from_origin(x1, y1, 1, -1))
-    return slicex, slicey, mask
+
+    # Handle empty slices after clipping
+    if slicex.start >= slicex.stop or slicey.start >= slicey.stop:
+        return slicex, slicey, np.array([], dtype=np.uint8).reshape(0, 0)
+
+    try:
+        rasterize([region], out=mask, transform=from_origin(x1, y1, 1, -1))
+    except ValueError as e:
+        if "width and height must be > 0" in str(e):
+            return slicex, slicey, np.array([], dtype=np.uint8).reshape(0, 0)
+        raise
+
+    return slicex, slicey, mask[slicey_mask, slicex_mask]
 
 
 def rasterize_chunk(block_data, block_info=None, region=None):
@@ -128,12 +156,11 @@ def get_extrema(x, axis=None):
     return da.take(x.ravel(), max_indices + add_indices)
 
 
-@njit(fastmath=True)
-def isnan(x):
-    if int(x) == -9223372036854775808:
-        return True
-    else:
-        return False
+@nb.njit((nb.bool(nb.float64)), fastmath=True)
+def isfinite_f64(x):
+    bits = np.float64(x).view(np.uint64)
+    exp_mask = 0x7FF0000000000000
+    return (bits & exp_mask) != exp_mask
 
 
 @njit((nb.float64[:](nb.float64[:], nb.float64)), fastmath=True)
@@ -146,7 +173,7 @@ def _numba_stats(data, beam_area):
     pnum = 0
 
     for i in data:
-        if not isnan(i):
+        if isfinite_f64(i):
             # sum
             res[0] += i
             # num
