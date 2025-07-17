@@ -1588,24 +1588,29 @@ def mmap_dask_array_old_v3(filename, shape, dtype, offset=0, chunks="auto"):
         chunks=(1,) * len(chunk_grid_shape) + slice_array.shape[-2:],
     )
 
-    def load_chunk_from_slices(slice_specs):
-        """Load chunk using pre-computed slice specifications."""
-        slice_specs = np.squeeze(slice_specs)[()]
-        slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
-
-        memmap_data = np.memmap(
-            filename, mode="r", shape=shape, dtype=dtype, offset=offset
-        )
-        return memmap_data[slices]
-
     # Use map_blocks with pre-computed slices
     return da.map_blocks(
-        load_chunk_from_slices,
+        _load_chunk_from_slices,
         slice_dask,
+        filename,
+        shape,
+        dtype,
+        offset,
         dtype=dtype,
         chunks=normalized_chunks,
         drop_axis=list(range(len(chunk_grid_shape), len(slice_dask.shape))),
     )
+
+
+def _load_chunk_from_slices(slice_specs, filename, shape, dtype, offset):
+    """Load chunk using pre-computed slice specifications."""
+    slice_specs = np.squeeze(slice_specs)[()]
+    slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
+
+    memmap_data = np.memmap(
+        filename, mode="r", shape=shape, dtype=dtype, offset=offset
+    )
+    return memmap_data[slices]
 
 
 def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
@@ -1679,20 +1684,14 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
         chunks=(1,) * len(chunk_grid_shape) + slice_array.shape[-2:],
     )
 
-    def load_chunk_from_slices(slice_specs):
-        """Load chunk using pre-computed slice specifications."""
-        slice_specs = np.squeeze(slice_specs)[()]
-        slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
-
-        memmap_data = np.memmap(
-            filename, mode="r", shape=shape, dtype=dtype, offset=offset
-        )
-        return memmap_data[slices]
-
     # Use map_blocks with pre-computed slices
     return da.map_blocks(
-        load_chunk_from_slices,
+        _load_chunk_from_slices,
         slice_dask,
+        filename,
+        shape,
+        dtype,
+        offset,
         dtype=dtype,
         chunks=normalized_chunks,
         drop_axis=list(range(len(chunk_grid_shape), len(slice_dask.shape))),

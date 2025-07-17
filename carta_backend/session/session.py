@@ -576,7 +576,13 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
 
-        if self.fm.files[file_id].raster_event.is_set() or tiles[0] == 0:
+        use_dask = self.fm.files[file_id].use_dask | self.use_dask
+
+        if (
+            use_dask
+            or self.fm.files[file_id].raster_event.is_set()
+            or tiles[0] == 0
+        ):
             clog.debug("Generate tiles separately")
             tasks = []
 
@@ -590,6 +596,7 @@ class Session:
                         compression_quality=compression_quality,
                         channel=channel,
                         stokes=stokes,
+                        use_dask=use_dask,
                     )
                 )
 
@@ -817,6 +824,7 @@ class Session:
         compression_quality: int,
         channel: int = 0,
         stokes: int = 0,
+        use_dask: bool = False,
     ) -> None:
         # Get tile data
         res = await self.fm.async_get_tile(
@@ -830,7 +838,7 @@ class Session:
             dtype=np.float32,
             semaphore=self.semaphore,
             n_jobs=N_JOBS,
-            use_dask=self.use_dask,
+            use_dask=use_dask,
         )
 
         comp_data, precision, nan_encodings, tile_shape = res

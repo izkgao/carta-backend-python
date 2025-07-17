@@ -1,4 +1,5 @@
 import math
+from time import perf_counter_ns
 
 import numba as nb
 import numpy as np
@@ -7,6 +8,9 @@ from zfpy import compress_numpy
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import MAX_COMPRESSION_QUALITY
+from carta_backend.log import logger
+
+pflog = logger.bind(name="Performance")
 
 
 def layer_to_mip(layer, image_shape, tile_shape=(256, 256)):
@@ -234,3 +238,38 @@ def compress_tile(data, compression_type, compression_quality):
         comp_data = data.tobytes()
         precision = compression_quality
     return comp_data, precision
+
+
+def compute_tile(
+    tile_data: np.ndarray,
+    compression_type: CARTA.CompressionType,
+    compression_quality: int,
+):
+    # NaN encodings
+    t0 = perf_counter_ns()
+    tile_height, tile_width = tile_data.shape
+    nan_encodings = get_nan_encodings_block(tile_data).tobytes()
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Get nan encodings in {dt:.3f} ms"
+    pflog.debug(msg)
+
+    # Fill NaNs
+    t0 = perf_counter_ns()
+    tile_data = fill_nan_with_block_average(tile_data)
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Fill NaN with block average in {dt:.3f} ms"
+    pflog.debug(msg)
+
+    # Compress data
+    t0 = perf_counter_ns()
+
+    comp_data, precision = compress_tile(
+        tile_data, compression_type, compression_quality
+    )
+
+    dt = (perf_counter_ns() - t0) / 1e6
+    msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
+    msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
+    pflog.debug(msg)
+
+    return comp_data, precision, nan_encodings, tile_data.shape

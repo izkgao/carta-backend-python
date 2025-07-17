@@ -10,6 +10,7 @@ import numpy as np
 import psutil
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
+from dask import delayed
 from xarray import Dataset, open_zarr
 
 from carta_backend import proto as CARTA
@@ -27,11 +28,9 @@ from carta_backend.file.utils import (
 )
 from carta_backend.log import logger
 from carta_backend.region.utils import numba_stats_2d
-from carta_backend.tile import (
-    compress_tile,
+from carta_backend.tile.utils import (
+    compute_tile,
     decode_tile_coord,
-    fill_nan_with_block_average,
-    get_nan_encodings_block,
     get_tile_original_slice,
     get_tile_slice,
     layer_to_mip,
@@ -84,6 +83,8 @@ class FileData:
     stokes: int = 0
     # Current time
     time: int = 0
+    # Use dask
+    use_dask: bool = False
 
 
 class FileManager:
@@ -106,11 +107,11 @@ class FileManager:
         file_type = get_file_type(file_path)
 
         if file_type == CARTA.FileType.FITS:
-            filedata = get_fits_FileData(
-                file_id, file_path, hdu_index, use_dask=self.use_dask
-            )
+            filedata = get_fits_FileData(file_id, file_path, hdu_index)
         elif file_type == CARTA.FileType.CASA:
             filedata = await get_zarr_FileData(file_id, file_path, self.client)
+
+        filedata.use_dask = self.use_dask
 
         self.files[file_id] = filedata
 
@@ -142,15 +143,24 @@ class FileManager:
         # load the full frame into memory
         frame_size_mib = self.files[file_id].frame_size_mib
         if frame_size_mib > (self.avail_mem * 0.25):
+            if not self.use_dask:
+                clog.warning(
+                    f"Frame size {frame_size_mib / 1024:.2f} GiB is greater "
+                    f"than 25% of available memory {self.avail_mem / 1024:.2f} "
+                    "GiB, falling back to use Dask as the compute backend for "
+                    "this file."
+                )
             use_dask = True
         else:
             use_dask = False
+
+        self.files[file_id].use_dask |= use_dask
 
         # Load data
         file_type = self.files[file_id].file_type
         wcs = self.files[file_id].wcs
 
-        if use_dask:
+        if self.files[file_id].use_dask:
             # Can be FITS or Zarr
             clog.debug("Using dask to load channel")
             _data = self.files[file_id].dask_channels
@@ -461,7 +471,7 @@ class FileManager:
             slicey, slicex = get_tile_slice(x, y, layer, image_shape)
             tile_data = data[slicey, slicex]
         else:
-            # From full frame data
+            # From full resolution data
             if frame_name in self.channel_cache:
                 # From cache
                 data = self.channel_cache[frame_name]
@@ -487,6 +497,7 @@ class FileManager:
                     max_workers=max_workers,
                     n_jobs=n_jobs,
                     use_dask=use_dask,
+                    return_future=use_dask,
                 )
 
             # Downsample
@@ -509,13 +520,19 @@ class FileManager:
                 pflog.debug(msg)
 
         if isinstance(tile_data, da.Array):
-            tile_data = await self.client.compute(tile_data)
-
-        res = self._compute_tile(
-            tile_data,
-            compression_type,
-            compression_quality,
-        )
+            # tile_data = await self.client.compute(tile_data)
+            res = delayed(compute_tile)(
+                tile_data,
+                compression_type,
+                compression_quality,
+            )
+            res = await self.client.compute(res)
+        else:
+            res = compute_tile(
+                tile_data,
+                compression_type,
+                compression_quality,
+            )
 
         comp_data, precision, nan_encodings, tile_shape = res
 
@@ -534,41 +551,6 @@ class FileManager:
         pflog.debug(msg)
 
         return comp_data, precision, nan_encodings, tile_shape
-
-    def _compute_tile(
-        self,
-        tile_data: np.ndarray,
-        compression_type: CARTA.CompressionType,
-        compression_quality: int,
-    ):
-        # NaN encodings
-        t0 = perf_counter_ns()
-        tile_height, tile_width = tile_data.shape
-        nan_encodings = get_nan_encodings_block(tile_data).tobytes()
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Get nan encodings in {dt:.3f} ms"
-        pflog.debug(msg)
-
-        # Fill NaNs
-        t0 = perf_counter_ns()
-        tile_data = fill_nan_with_block_average(tile_data)
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Fill NaN with block average in {dt:.3f} ms"
-        pflog.debug(msg)
-
-        # Compress data
-        t0 = perf_counter_ns()
-
-        comp_data, precision = compress_tile(
-            tile_data, compression_type, compression_quality
-        )
-
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
-        msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
-        pflog.debug(msg)
-
-        return comp_data, precision, nan_encodings, tile_data.shape
 
     async def async_get_tiles(
         self,
@@ -1042,11 +1024,15 @@ class FileManager:
         self.channel_cache.clear()
 
 
-def get_fits_FileData(file_id, file_path, hdu_index, use_dask=False):
+def get_fits_FileData(file_id, file_path, hdu_index):
     t0 = perf_counter_ns()
 
     # Read file information
     with fits.open(file_path, memmap=True, mode="denywrite") as hdul:
+        while True:
+            if hdul[hdu_index].data is not None:
+                break
+            hdu_index += 1
         hdu = hdul[hdu_index]
         dtype = np.dtype(hdu.data.dtype)
         shape = hdu.data.shape
@@ -1144,6 +1130,7 @@ def get_fits_FileData(file_id, file_path, hdu_index, use_dask=False):
         },
         cursor_coords=[None, None, None],
         axes_dict=get_axes_dict(header),
+        use_dask=False,
     )
     return filedata
 
@@ -1209,5 +1196,6 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         },
         cursor_coords=[None, None, None],
         axes_dict=get_axes_dict(header),
+        use_dask=False,
     )
     return filedata
