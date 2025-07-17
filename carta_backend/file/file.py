@@ -87,11 +87,12 @@ class FileData:
 
 
 class FileManager:
-    def __init__(self, client=None):
+    def __init__(self, client=None, use_dask: bool = False):
         self.files = {}
         self.channel_cache = {}
         self.tile_cache = {}
         self.client = client
+        self.use_dask = use_dask
 
         self.avail_mem = (
             psutil.virtual_memory().available / 1024**2
@@ -105,7 +106,9 @@ class FileManager:
         file_type = get_file_type(file_path)
 
         if file_type == CARTA.FileType.FITS:
-            filedata = get_fits_FileData(file_id, file_path, hdu_index)
+            filedata = get_fits_FileData(
+                file_id, file_path, hdu_index, use_dask=self.use_dask
+            )
         elif file_type == CARTA.FileType.CASA:
             filedata = await get_zarr_FileData(file_id, file_path, self.client)
 
@@ -1039,7 +1042,7 @@ class FileManager:
         self.channel_cache.clear()
 
 
-def get_fits_FileData(file_id, file_path, hdu_index):
+def get_fits_FileData(file_id, file_path, hdu_index, use_dask=False):
     t0 = perf_counter_ns()
 
     # Read file information
@@ -1086,19 +1089,22 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     msg = f"Create dask array in {dt:.3f} ms"
     clog.debug(msg)
 
-    # Create dask channels
-    t0 = perf_counter_ns()
-    chunks = get_fits_dask_channels_chunks(wcs)
-    dask_channels = mmap_dask_array(
-        filename=file_path,
-        shape=shape,
-        dtype=dtype,
-        offset=offset,
-        chunks=chunks,
-    )
-    dt = (perf_counter_ns() - t0) / 1e6
-    msg = f"Create dask channels array in {dt:.3f} ms"
-    clog.debug(msg)
+    if use_dask:
+        # Create dask channels
+        t0 = perf_counter_ns()
+        chunks = get_fits_dask_channels_chunks(wcs)
+        dask_channels = mmap_dask_array(
+            filename=file_path,
+            shape=shape,
+            dtype=dtype,
+            offset=offset,
+            chunks=chunks,
+        )
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Create dask channels array in {dt:.3f} ms"
+        clog.debug(msg)
+    else:
+        dask_channels = None
 
     # Get and set image information
     header["PIX_AREA"] = np.abs(

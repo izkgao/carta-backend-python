@@ -88,8 +88,8 @@ class Session:
         self.starting_folder = Path(starting_folder)
         self.lock = lock or asyncio.Lock()
         self.client = client
-        self.fm = FileManager(client)
         self.use_dask = use_dask
+        self.fm = FileManager(client, use_dask=self.use_dask)
 
         # Set up message queue
         self.queue = asyncio.Queue()
