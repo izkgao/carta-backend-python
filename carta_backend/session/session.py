@@ -1074,7 +1074,7 @@ class Session:
             else:
                 to_send = False
 
-        if to_send:
+        if to_send and self.fm.files[file_id].raster_event.is_set():
             # Send spatial profile data outside the lock
             sprx = params_for_sending["sprx"]
             spry = params_for_sending["spry"]
@@ -1128,26 +1128,27 @@ class Session:
             }
             send_spectral_profile = self.spec_prof_cursor_on
 
-        # Send spatial profile data
-        await self.send_SpatialProfileData(
-            request_id=0,
-            file_id=file_id,
-            x=x,
-            y=y,
-            **params_for_sending,
-        )
-
-        # Send spectral profile if enabled
-        if send_spectral_profile:
-            await self.send_SpectralProfileData(
+        if self.fm.files[file_id].raster_event.is_set():
+            # Send spatial profile data
+            await self.send_SpatialProfileData(
                 request_id=0,
                 file_id=file_id,
-                region_id=0,
                 x=x,
                 y=y,
-                stats_type=2,
-                token=cursor_token,
+                **params_for_sending,
             )
+
+            # Send spectral profile if enabled
+            if send_spectral_profile:
+                await self.send_SpectralProfileData(
+                    request_id=0,
+                    file_id=file_id,
+                    region_id=0,
+                    x=x,
+                    y=y,
+                    stats_type=2,
+                    token=cursor_token,
+                )
 
         return None
 
