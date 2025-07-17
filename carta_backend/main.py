@@ -1,8 +1,11 @@
 import argparse
 import asyncio
+import os
 import sys
 from importlib.metadata import version as get_version
 from uuid import uuid4
+
+os.environ["NUMBA_THREADING_LAYER"] = "omp"
 
 import dask.config
 

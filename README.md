@@ -10,26 +10,27 @@ git clone https://github.com/izkgao/carta-backend-python.git
 cd carta-backend-python
 ```
 
-## Install (using uv) (recommended)
-
-```bash
-uv sync
-uv pip install -e .
-source .venv/bin/activate
-```
-
 ## Install (using conda/mamba/micromamba)
 
-### Create conda environment
+If you do not have any of `conda`, `mamba`, or `micromamba` installed, please follow [the instructions](https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html) to install `micromamba` first.
+
+### Create conda/mamba/micromamba environment
 
 ```bash
-conda create -n carta-backend python=3.13 -y
+conda create -n carta-backend python=3.13
 conda activate carta-backend
 ```
+
+### Install dependencies
+
+```bash
+conda install -c conda-forge llvm-openmp uv
+```
+
 ### Install carta-backend
 
 ```bash
-pip install -e .
+uv pip install -e .
 ```
 
 ## Download CARTA frontend

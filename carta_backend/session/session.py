@@ -9,6 +9,7 @@ import dask.array as da
 import numpy as np
 from astropy.io import fits
 from dask.distributed import Client
+from numba import threading_layer
 from xarray import open_zarr
 
 from carta_backend import proto as CARTA
@@ -111,6 +112,9 @@ class Session:
 
         # Region
         self.region_dict = {}
+
+        # Show numba threading layer
+        clog.debug(f"Numba threading layer: {threading_layer()}")
 
     async def close(self):
         # Close dask client
