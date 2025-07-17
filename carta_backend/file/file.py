@@ -70,6 +70,8 @@ class FileData:
     frame_size_mib: float
     # Event to signal when histogram is ready
     hist_event: asyncio.Event
+    # Event to signal when raster is ready
+    raster_event: asyncio.Event
     # Spatial requirements
     spat_req: Dict[str, Dict[str, int | None]]
     # Cursor coordinates
@@ -436,6 +438,7 @@ class FileManager:
         n_jobs: int = 4,
         use_dask: bool = False,
     ):
+        t0 = perf_counter_ns()
         x, y, layer = decode_tile_coord(tile)
         image_shape = self.files[file_id].img_shape
         mip = layer_to_mip(layer, image_shape=image_shape)
@@ -492,12 +495,13 @@ class FileManager:
                     trim_excess=True,
                 )
             else:
-                t0 = perf_counter_ns()
+                t1 = perf_counter_ns()
                 tile_data = await asyncio.to_thread(
                     block_reduce_numba, tile_data, mip
                 )
-                dt = (perf_counter_ns() - t0) / 1e6
-                msg = f"Downsample {tile_data.shape[1]}x{tile_data.shape[0]} tile data in {dt:.3f} ms "
+                dt = (perf_counter_ns() - t1) / 1e6
+                iy, ix = tile_data.shape
+                msg = f"Downsample tile data to {ix}x{iy} in {dt:.3f} ms "
                 msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
                 pflog.debug(msg)
 
@@ -520,6 +524,11 @@ class FileManager:
                 nan_encodings,
                 tile_shape,
             )
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Compute tile data in {dt:.3f} ms "
+        msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        pflog.debug(msg)
 
         return comp_data, precision, nan_encodings, tile_shape
 
@@ -1123,6 +1132,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         sizes=sizes,
         memmap_info=memmap_info,
         hist_event=asyncio.Event(),
+        raster_event=asyncio.Event(),
         data_size_mib=data_size_mib,
         frame_size_mib=frame_size_mib,
         spat_req={
@@ -1187,6 +1197,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
         img_shape=img_shape,
         sizes=sizes,
         hist_event=asyncio.Event(),
+        raster_event=asyncio.Event(),
         data_size_mib=data_size_mib,
         frame_size_mib=frame_size_mib,
         spat_req={

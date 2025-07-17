@@ -45,6 +45,7 @@ from carta_backend.tile import (
     compress_tile,
     decode_tile_coord,
     get_nan_encodings_block,
+    get_tile_slice,
 )
 from carta_backend.utils import PROTO_FUNC_MAP, get_event_info, get_system_info
 
@@ -571,22 +572,66 @@ class Session:
         # RasterTileData
         t0 = perf_counter_ns()
 
-        tasks = []
+        if self.fm.files[file_id].raster_event.is_set() or tiles[0] == 0:
+            clog.debug("Generate tiles separately")
+            tasks = []
 
-        for tile in tiles:
-            tasks.append(
-                self.send_RasterTileData_v2(
-                    request_id=request_id,
-                    file_id=file_id,
-                    tile=tile,
-                    compression_type=compression_type,
-                    compression_quality=compression_quality,
-                    channel=channel,
-                    stokes=stokes,
+            for tile in tiles:
+                tasks.append(
+                    self.send_RasterTileData_v2(
+                        request_id=request_id,
+                        file_id=file_id,
+                        tile=tile,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                    )
                 )
-            )
 
-        await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)
+        else:
+            # All tiles
+            clog.debug("Generate all tiles using full image")
+            t1 = perf_counter_ns()
+            _, _, layer = decode_tile_coord(tiles[0])
+            data = await self.fm.async_get_channel_mip(
+                file_id=file_id,
+                channel=channel,
+                stokes=stokes,
+                time=0,
+                layer=layer,
+            )
+            read_dt = (perf_counter_ns() - t1) / 1e6
+
+            tasks = []
+            for tile in tiles:
+                x, y, layer = decode_tile_coord(tile)
+                y_slice, x_slice = get_tile_slice(
+                    x, y, layer, self.fm.files[file_id].img_shape
+                )
+                tile_data = data[y_slice, x_slice]
+
+                tasks.append(
+                    asyncio.to_thread(
+                        self.send_RasterTileData,
+                        request_id=request_id,
+                        file_id=file_id,
+                        data=tile_data,
+                        compression_type=compression_type,
+                        compression_quality=compression_quality,
+                        channel=channel,
+                        stokes=stokes,
+                        x=x,
+                        y=y,
+                        layer=layer,
+                        read_dt=read_dt,
+                    )
+                )
+
+            await asyncio.gather(*tasks)
+
+            self.fm.files[file_id].raster_event.set()
 
         # tasks = []
 
@@ -686,28 +731,27 @@ class Session:
         x: int = None,
         y: int = None,
         layer: int = None,
+        read_dt: float = 0,
     ) -> None:
         t0 = perf_counter_ns()
+
+        # Get nan encodings
+        t1 = perf_counter_ns()
         tile_height, tile_width = data.shape
         nan_encodings = get_nan_encodings_block(data).tobytes()
-        dt = (perf_counter_ns() - t0) / 1e6
+        dt = (perf_counter_ns() - t1) / 1e6
         msg = f"Get nan encodings in {dt:.3f} ms"
         pflog.debug(msg)
 
         # Fill NaNs
-        t0 = perf_counter_ns()
+        t1 = perf_counter_ns()
         data = self.fill_nan_with_block_average(data)
-        dt = (perf_counter_ns() - t0) / 1e6
+        dt = (perf_counter_ns() - t1) / 1e6
         msg = f"Fill NaN with block average in {dt:.3f} ms"
         pflog.debug(msg)
 
-        # msg = f"Nearest neighbour filter {tile_width}x{tile_height} "
-        # msg += f"raster data to {tile_width}x{tile_height} in "
-        # msg += f"{dt:.3f} ms at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
-        # pflog.debug(msg)
-
         # Compress data
-        t0 = perf_counter_ns()
+        t1 = perf_counter_ns()
 
         comp_data, precision = compress_tile(
             data, compression_type, compression_quality
@@ -719,8 +763,13 @@ class Session:
                 f"(originally requested precision: {compression_quality})."
             )
 
-        dt = (perf_counter_ns() - t0) / 1e6
+        dt = (perf_counter_ns() - t1) / 1e6
         msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
+        msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
+        pflog.debug(msg)
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Compute tile data in {dt:.3f} ms "
         msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
         pflog.debug(msg)
 
@@ -939,6 +988,7 @@ class Session:
         )
 
         # RasterTile
+        self.fm.files[file_id].raster_event.clear()
         await self.send_RasterTileSync(
             request_id=0,
             file_id=file_id,
