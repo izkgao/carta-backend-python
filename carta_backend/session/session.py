@@ -1232,11 +1232,7 @@ class Session:
         if isinstance(data, da.Array):
             # Compute tasks
             futures = self.client.compute(
-                [
-                    data[my, mx],
-                    data[my, slice_x].astype("<f4"),
-                    data[slice_y, mx].astype("<f4"),
-                ]
+                [data[my, mx], data[my, slice_x], data[slice_y, mx]]
             )
 
             # Check if this is still the current task during computation
