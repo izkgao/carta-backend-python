@@ -54,10 +54,16 @@ class ProgramSettings:
 
             if os.path.isdir(self.file_or_folder):
                 # Zarr
-                if os.path.exists(os.path.join(self.file_or_folder, ".zattrs")):
+                if os.path.exists(
+                    os.path.join(self.file_or_folder, ".zattrs")
+                ) and os.path.isdir(os.path.join(self.file_or_folder, "SKY")):
                     self.file = self.file_or_folder
                 # CASA
-                elif os.path.exists(os.path.join(self.file_or_folder, "table.lock")):
+                elif os.path.exists(
+                    os.path.join(self.file_or_folder, "table.lock")
+                ) and os.path.isdir(
+                    os.path.join(self.file_or_folder, "logtable")
+                ):
                     self.file = self.file_or_folder
                 # Directory
                 else:
