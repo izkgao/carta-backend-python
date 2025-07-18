@@ -1,7 +1,7 @@
 import os
 import platform
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote
 
 
@@ -72,5 +72,14 @@ class ProgramSettings:
                 self.file = self.file_or_folder
 
         if self.file is not None:
-            file = Path(self.file).relative_to(self.top_level_folder)
-            self.file = quote(bytes(file), safe="")
+            if platform.system() == "Windows":
+                if self.top_level_folder == "/":
+                    # WindowsPath("C:/Users/username")
+                    # Users/username
+                    file = Path(self.file)
+                    file = file.relative_to(file.anchor).as_posix()
+                    # C/Users/username
+                    file = PurePosixPath(file.anchor[0]) / file
+                    self.file = file.as_posix()
+            self.file = Path(self.file).relative_to(self.top_level_folder)
+            self.file = quote(bytes(self.file), safe="")

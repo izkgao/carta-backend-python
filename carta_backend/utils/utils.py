@@ -4,6 +4,7 @@ import platform
 import socket
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
 from typing import Tuple
 
 import aiofiles.os
@@ -129,6 +130,65 @@ async def async_get_folder_size(path: str) -> int:
         sizes = await asyncio.gather(*sizes)
         total_size += sum(sizes)
     return total_size
+
+
+def parse_frontend_directory(directory, starting_folder, top_level_folder):
+    is_windows = platform.system() == "Windows"
+
+    if directory == "$BASE":
+        directory = starting_folder
+    elif is_windows:
+        if top_level_folder == Path("/"):
+            if directory == "":
+                directory = "virtual_root"
+            else:
+                _top_level_folder = PurePosixPath(top_level_folder)
+                # PurePosixPath("/C/Users")
+                directory = _top_level_folder / directory
+                directory = str(directory)
+                # WindowsPath("C:/Users")
+                directory = Path(f"{directory[1]}:\\") / directory[3:]
+        else:
+            directory = top_level_folder / directory
+    else:
+        directory = top_level_folder / directory
+
+    if is_windows:
+        if top_level_folder == Path("/"):
+            if directory == "virtual_root":
+                _directory = ""
+                parent = "."
+            else:
+                # WindowsPath("C:/Users/username")
+                # Users/username
+                _directory = directory.relative_to(directory.anchor).as_posix()
+                # C/Users/username
+                _directory = PurePosixPath(directory.anchor[0]) / _directory
+
+                parent = _directory.parent.as_posix()
+                _directory = _directory.as_posix()
+        else:
+            # directory: WindowsPath("C:/Users/username")
+            # top_level_folder: WindowsPath("C:/Users/")
+            _directory = directory.relative_to(top_level_folder).as_posix()
+
+            if directory.parent == top_level_folder:
+                _directory = ""
+                parent = "."
+            else:
+                parent = directory.parent.relative_to(
+                    top_level_folder
+                ).as_posix()
+    else:
+        _directory = directory.relative_to(top_level_folder).as_posix()
+
+        if directory.parent == top_level_folder:
+            _directory = ""
+            parent = "."
+        else:
+            parent = directory.parent.relative_to(top_level_folder).as_posix()
+
+    return directory, _directory, parent
 
 
 PROTO_FUNC_MAP = {
