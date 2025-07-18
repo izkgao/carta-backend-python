@@ -24,10 +24,12 @@ class ProgramSettings:
         self.backend_path = os.path.abspath(backend_path)
         self.user_folder_prefix = user_folder_prefix
         if platform.system() == "Windows":
-            cwd = Path.cwd()
-            self.top_level_folder = Path(f"{cwd.drive}\\")
+            if top_level_folder == "/":
+                self.top_level_folder = top_level_folder
+            else:
+                self.top_level_folder = os.path.abspath(top_level_folder)
         else:
-            self.top_level_folder = top_level_folder
+            self.top_level_folder = os.path.abspath(top_level_folder)
         self.starting_folder = os.path.abspath(starting_folder)
         self.file_or_folder = file_or_folder
         self.version = version
@@ -52,14 +54,10 @@ class ProgramSettings:
 
             if os.path.isdir(self.file_or_folder):
                 # Zarr
-                if os.path.exists(
-                    os.path.join(self.file_or_folder, ".zattrs")
-                ):
+                if os.path.exists(os.path.join(self.file_or_folder, ".zattrs")):
                     self.file = self.file_or_folder
                 # CASA
-                elif os.path.exists(
-                    os.path.join(self.file_or_folder, "table.lock")
-                ):
+                elif os.path.exists(os.path.join(self.file_or_folder, "table.lock")):
                     self.file = self.file_or_folder
                 # Directory
                 else:

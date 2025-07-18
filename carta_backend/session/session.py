@@ -1,12 +1,14 @@
 import asyncio
 import itertools
 import os
-from pathlib import Path
+import platform
+from pathlib import Path, PurePosixPath
 from time import perf_counter_ns
 from typing import Any, Optional, Tuple
 
 import dask.array as da
 import numpy as np
+import psutil
 from astropy.io import fits
 from dask.distributed import Client
 from numba import threading_layer
@@ -152,9 +154,7 @@ class Session:
 
         return event_type, request_id, obj
 
-    def encode_message(
-        self, event_type: int, request_id: int, obj: Any
-    ) -> bytes:
+    def encode_message(self, event_type: int, request_id: int, obj: Any) -> bytes:
         message = event_type.to_bytes(2, byteorder="little")
         message += ICD_VERSION.to_bytes(2, byteorder="little")
         message += request_id.to_bytes(4, byteorder="little")
@@ -241,9 +241,24 @@ class Session:
         directory = obj.directory
         # filter_mode = obj.filter_mode
 
+        is_windows = platform.system() == "Windows"
+
         # Set directory
         if directory == "$BASE":
             directory = self.starting_folder
+        elif is_windows:
+            if self.top_level_folder == Path("/"):
+                if directory == "":
+                    directory = "virtual_root"
+                else:
+                    top_level_folder = PurePosixPath(self.top_level_folder)
+                    # PurePosixPath("/C/Users")
+                    directory = top_level_folder / directory
+                    directory = str(directory)
+                    # WindowsPath("C:/Users")
+                    directory = Path(f"{directory[1]}:\\") / directory[3:]
+            else:
+                directory = self.top_level_folder / directory
         else:
             directory = self.top_level_folder / directory
 
@@ -253,13 +268,61 @@ class Session:
 
         # Create response object
         response = CARTA.FileListResponse()
-        response.directory = str(directory.relative_to(self.top_level_folder))
-        parent = directory.parent
-        if parent == self.top_level_folder:
-            parent = ""
+
+        if is_windows:
+            if self.top_level_folder == Path("/"):
+                if directory == "virtual_root":
+                    _directory = ""
+                    parent = "."
+                else:
+                    # WindowsPath("C:/Users/username")
+                    # Users/username
+                    _directory = directory.relative_to(directory.anchor).as_posix()
+                    # /C/Users/username
+                    _directory = PurePosixPath(directory.anchor[0]) / _directory
+
+                    parent = _directory.parent.as_posix()
+                    _directory = _directory.as_posix()
+            else:
+                # directory: WindowsPath("C:/Users/username")
+                # top_level_folder: WindowsPath("C:/Users/")
+                _directory = directory.relative_to(self.top_level_folder).as_posix()
+
+                if directory.parent == self.top_level_folder:
+                    _directory = ""
+                    parent = "."
+                else:
+                    parent = directory.parent.relative_to(
+                        self.top_level_folder
+                    ).as_posix()
         else:
-            parent = str(parent.relative_to(self.top_level_folder))
+            _directory = directory.relative_to(self.top_level_folder).as_posix()
+
+            if directory.parent == self.top_level_folder:
+                _directory = ""
+                parent = "."
+            else:
+                parent = directory.parent.relative_to(self.top_level_folder).as_posix()
+
+        response.directory = _directory
         response.parent = parent
+
+        if directory == "virtual_root":
+            files = []
+            subdirectories = []
+            for partition in psutil.disk_partitions():
+                drive = Path(partition.device).drive.rstrip(":")
+                dir_info = CARTA.DirectoryInfo()
+                dir_info.name = drive
+                subdirectories.append(dir_info)
+
+            response.files.extend(files)
+            response.subdirectories.extend(subdirectories)
+            response.success = True
+            event_type = CARTA.EventType.FILE_LIST_RESPONSE
+            message = self.encode_message(event_type, request_id, response)
+            self.queue.put_nowait(message)
+            return None
 
         # Check if directory is accessible
         if not is_accessible(directory):
@@ -290,9 +353,7 @@ class Session:
                         response.cancel = True
                         event_type = CARTA.EventType.FILE_LIST_RESPONSE
                         # Encode message
-                        message = self.encode_message(
-                            event_type, request_id, response
-                        )
+                        message = self.encode_message(event_type, request_id, response)
                         # Send message
                         self.queue.put_nowait(message)
                         return None
@@ -593,11 +654,7 @@ class Session:
 
         use_dask = self.fm.files[file_id].use_dask
 
-        if (
-            use_dask
-            or self.fm.files[file_id].raster_event.is_set()
-            or tiles[0] == 0
-        ):
+        if use_dask or self.fm.files[file_id].raster_event.is_set() or tiles[0] == 0:
             clog.debug("Generate tiles separately")
             tasks = []
 
@@ -1471,9 +1528,7 @@ class Session:
                     input_queue = asyncio.Queue()
                     output_queue = asyncio.Queue()
                     executor_task = asyncio.create_task(
-                        self.dask_executor_for_region(
-                            input_queue, output_queue
-                        )
+                        self.dask_executor_for_region(input_queue, output_queue)
                     )
 
                     for istart in range(start, stop, delta_z):
@@ -1503,12 +1558,8 @@ class Session:
                         use_dask=True,
                         return_future=True,
                     )
-                    part_spec_profs = get_spectral_profile_dask(
-                        data, region, hdr
-                    )
-                    part_spec_profs = await self.client.compute(
-                        part_spec_profs
-                    )
+                    part_spec_profs = get_spectral_profile_dask(data, region, hdr)
+                    part_spec_profs = await self.client.compute(part_spec_profs)
             else:
                 part_spec_profs = await self.fm.async_get_region_spectrum(
                     file_id=file_id,
@@ -1534,9 +1585,7 @@ class Session:
             # Adjust delta_z based on time taken
             time_taken_ms = (t_end_slice - t_start_slice) / 1e6
             adjustment_factor = dt_partial_update / time_taken_ms
-            delta_z = int(
-                max(1, min(delta_z * adjustment_factor, channel_size))
-            )
+            delta_z = int(max(1, min(delta_z * adjustment_factor, channel_size)))
 
             sp.raw_values_fp64 = spec_profiles[stats_type - 2].tobytes()
 
@@ -1680,9 +1729,7 @@ class Session:
             # Adjust delta_z based on time taken
             time_taken_ms = (t_end_slice - t_start_slice) / 1e6
             adjustment_factor = dt_partial_update / time_taken_ms
-            delta_z = int(
-                max(1, min(delta_z * adjustment_factor, channel_size))
-            )
+            delta_z = int(max(1, min(delta_z * adjustment_factor, channel_size)))
 
             if region_id == 0:
                 sp.raw_values_fp32 = spec_profile.tobytes()
