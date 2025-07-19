@@ -1373,10 +1373,12 @@ async def async_read_zarr_channel(
         )
         nitems = np.prod(layer_shape)
 
+        itemsize = dtype.itemsize
+
         async with semaphore:
             async with aiofiles.open(chunk_filename, "rb") as f:
-                await f.seek(start)
-                chunk_data = await f.read(nitems * dtype.itemsize)
+                await f.seek(start * itemsize)
+                chunk_data = await f.read(nitems * itemsize)
 
         chunk_data = np.frombuffer(chunk_data, dtype=dtype).reshape(
             layer_shape, order=order
