@@ -1245,13 +1245,8 @@ async def async_read_zarr_slice(
             data_piece = chunk_data[chunk_slice]
             return data_piece
 
-        async def read_chunk_with_semaphore(plan):
-            async with semaphore:
-                return await read_chunk(plan)
-
-        result[global_slice] = await asyncio.to_thread(
-            read_chunk_with_semaphore, plan
-        )
+        async with semaphore:
+            result[global_slice] = await asyncio.to_thread(read_chunk)
 
     async def decomp_read_and_insert(plan):
         chunk_id = plan["chunk_id"]
