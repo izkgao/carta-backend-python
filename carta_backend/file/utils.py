@@ -878,9 +878,8 @@ def isfinite_f32(x):
 
 
 @nb.njit(
-    (nb.float32[:, :](nb.float32[:, :], nb.int32)),
+    (nb.float32[:, :](nb.float32[:, :], nb.int64)),
     parallel=True,
-    fastmath=True,
 )
 def block_reduce_numba(arr, factor):
     rows, cols = arr.shape
@@ -891,27 +890,32 @@ def block_reduce_numba(arr, factor):
 
     result = np.empty((n_block_rows, n_block_cols), dtype=np.float32)
 
-    for i in nb.prange(n_block_rows):
-        for j in range(n_block_cols):
-            row_start = i * block_rows
-            row_end = min(row_start + block_rows, rows)
-            col_start = j * block_cols
-            col_end = min(col_start + block_cols, cols)
+    nan32 = np.float32(np.nan)
 
-            sum_val = 0.0
+    for i in nb.prange(n_block_rows):
+        i = np.uint64(i)
+        row_start = np.uint64(i * block_rows)
+        row_end = np.uint64(min(row_start + block_rows, rows))
+
+        for j in range(n_block_cols):
+            j = np.uint64(j)
+            col_start = np.uint64(j * block_cols)
+            col_end = np.uint64(min(col_start + block_cols, cols))
+
+            sum_val = np.float32(0.0)
             count = 0
 
             for ii in range(row_start, row_end):
                 for jj in range(col_start, col_end):
                     val = arr[ii, jj]
-                    if isfinite_f32(val):
+                    if np.isfinite(val):
                         sum_val += val
                         count += 1
 
             if count == 0:
-                result[i, j] = np.nan
+                result[i, j] = nan32
             else:
-                result[i, j] = sum_val / count
+                result[i, j] = np.float32(sum_val / count)
 
     return result
 
