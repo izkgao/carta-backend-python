@@ -284,12 +284,17 @@ class FileManager:
         # Downsample data
         if mip > 1:
             if isinstance(data, da.Array):
-                data = da.coarsen(
-                    da.nanmean,
-                    data,
-                    {0: mip, 1: mip},
-                    trim_excess=True,
-                )
+                # Check if need to pad NaN
+                if data.shape[0] % mip != 0 or data.shape[1] % mip != 0:
+                    pad_y = mip - data.shape[0] % mip
+                    pad_x = mip - data.shape[1] % mip
+                    pad_y = pad_y if pad_y != mip else 0
+                    pad_x = pad_x if pad_x != mip else 0
+                    padding = ((0, pad_y), (0, pad_x))
+                    data = da.pad(
+                        data, padding, mode="constant", constant_values=da.nan
+                    )
+                data = da.coarsen(da.nanmean, data, {0: mip, 1: mip})
             else:
                 data = await asyncio.to_thread(block_reduce_numba, data, mip)
 
@@ -344,12 +349,17 @@ class FileManager:
 
         # Coarsen
         if isinstance(data, da.Array):
-            data = da.coarsen(
-                da.nanmean,
-                data,
-                {0: mip, 1: mip},
-                trim_excess=True,
-            )
+            # Check if need to pad NaN
+            if data.shape[0] % mip != 0 or data.shape[1] % mip != 0:
+                pad_y = mip - data.shape[0] % mip
+                pad_x = mip - data.shape[1] % mip
+                pad_y = pad_y if pad_y != mip else 0
+                pad_x = pad_x if pad_x != mip else 0
+                padding = ((0, pad_y), (0, pad_x))
+                data = da.pad(
+                    data, padding, mode="constant", constant_values=da.nan
+                )
+            data = da.coarsen(da.nanmean, data, {0: mip, 1: mip})
         elif isinstance(data, np.ndarray):
             data = block_reduce_numba(data, mip)
 
@@ -529,12 +539,23 @@ class FileManager:
 
             # Downsample
             if isinstance(tile_data, da.Array):
-                tile_data = da.coarsen(
-                    da.nanmean,
-                    tile_data,
-                    {0: mip, 1: mip},
-                    trim_excess=True,
-                )
+                # Check if need to pad NaN
+                if (
+                    tile_data.shape[0] % mip != 0
+                    or tile_data.shape[1] % mip != 0
+                ):
+                    pad_y = mip - tile_data.shape[0] % mip
+                    pad_x = mip - tile_data.shape[1] % mip
+                    pad_y = pad_y if pad_y != mip else 0
+                    pad_x = pad_x if pad_x != mip else 0
+                    padding = ((0, pad_y), (0, pad_x))
+                    tile_data = da.pad(
+                        tile_data,
+                        padding,
+                        mode="constant",
+                        constant_values=da.nan,
+                    )
+                tile_data = da.coarsen(da.nanmean, tile_data, {0: mip, 1: mip})
             else:
                 t1 = perf_counter_ns()
                 tile_data = await asyncio.to_thread(

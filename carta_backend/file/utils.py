@@ -886,8 +886,8 @@ def block_reduce_numba(arr, factor):
     rows, cols = arr.shape
     block_rows, block_cols = factor, factor
 
-    n_block_rows = rows // factor
-    n_block_cols = cols // factor
+    n_block_rows = (rows + factor - 1) // factor
+    n_block_cols = (cols + factor - 1) // factor
 
     result = np.empty((n_block_rows, n_block_cols), dtype=np.float32)
 
