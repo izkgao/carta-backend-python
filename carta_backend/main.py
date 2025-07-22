@@ -272,8 +272,10 @@ def main():
         use_dask=args.use_dask,
     )
 
+    import uvloop
+
     try:
-        asyncio.run(
+        uvloop.run(
             server.start(
                 open_browser=not args.no_browser,
             )
