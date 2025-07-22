@@ -272,4 +272,10 @@ def compute_tile(
     msg += f"at {tile_data.size / 1e6 / dt * 1000:.3f} MPix/s"
     pflog.debug(msg)
 
+    if precision > compression_quality:
+        pflog.debug(
+            f"Upgraded precision to {precision} "
+            f"(originally requested precision: {compression_quality})."
+        )
+
     return comp_data, precision, nan_encodings, tile_data.shape

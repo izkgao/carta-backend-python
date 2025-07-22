@@ -43,10 +43,9 @@ from carta_backend.region.utils import (
     get_spectral_profile_dask,
     parse_region,
 )
-from carta_backend.tile import (
-    compress_tile,
+from carta_backend.tile.utils import (
+    compute_tile,
     decode_tile_coord,
-    get_nan_encodings_block,
     get_tile_slice,
 )
 from carta_backend.utils.utils import (
@@ -640,7 +639,6 @@ class Session:
         else:
             # All tiles
             clog.debug("Generate all tiles using full image")
-            t1 = perf_counter_ns()
             _, _, layer = decode_tile_coord(tiles[0])
             data = await self.fm.async_get_channel_mip(
                 file_id=file_id,
@@ -651,7 +649,6 @@ class Session:
                 semaphore=self.semaphore,
                 use_dask=False,
             )
-            read_dt = (perf_counter_ns() - t1) / 1e6
 
             tasks = []
             for tile in tiles:
@@ -661,22 +658,20 @@ class Session:
                 )
                 tile_data = data[y_slice, x_slice]
 
-                tasks.append(
-                    asyncio.to_thread(
-                        self.send_RasterTileData,
-                        request_id=request_id,
-                        file_id=file_id,
-                        data=tile_data,
-                        compression_type=compression_type,
-                        compression_quality=compression_quality,
-                        channel=channel,
-                        stokes=stokes,
-                        x=x,
-                        y=y,
-                        layer=layer,
-                        read_dt=read_dt,
-                    )
+                task = self.send_RasterTileData(
+                    request_id=request_id,
+                    file_id=file_id,
+                    data=tile_data,
+                    compression_type=compression_type,
+                    compression_quality=compression_quality,
+                    channel=channel,
+                    stokes=stokes,
+                    x=x,
+                    y=y,
+                    layer=layer,
                 )
+
+                tasks.append(task)
 
             await asyncio.gather(*tasks)
 
@@ -768,7 +763,7 @@ class Session:
 
         return None
 
-    def send_RasterTileData(
+    async def send_RasterTileData(
         self,
         request_id: int,
         file_id: int,
@@ -780,47 +775,15 @@ class Session:
         x: int = None,
         y: int = None,
         layer: int = None,
-        read_dt: float = 0,
     ) -> None:
-        t0 = perf_counter_ns()
-
-        # Get nan encodings
-        t1 = perf_counter_ns()
-        tile_height, tile_width = data.shape
-        nan_encodings = get_nan_encodings_block(data).tobytes()
-        dt = (perf_counter_ns() - t1) / 1e6
-        msg = f"Get nan encodings in {dt:.3f} ms"
-        pflog.debug(msg)
-
-        # Fill NaNs
-        t1 = perf_counter_ns()
-        data = self.fill_nan_with_block_average(data)
-        dt = (perf_counter_ns() - t1) / 1e6
-        msg = f"Fill NaN with block average in {dt:.3f} ms"
-        pflog.debug(msg)
-
-        # Compress data
-        t1 = perf_counter_ns()
-
-        comp_data, precision = compress_tile(
-            data, compression_type, compression_quality
+        res = await asyncio.to_thread(
+            compute_tile, data, compression_type, compression_quality
         )
+        comp_data, precision, nan_encodings, tile_shape = res
 
-        if precision > compression_quality:
-            pflog.debug(
-                f"Upgraded precision to {precision} "
-                f"(originally requested precision: {compression_quality})."
-            )
+        tile_height, tile_width = tile_shape
 
-        dt = (perf_counter_ns() - t1) / 1e6
-        msg = f"Compress {tile_width}x{tile_height} tile data in {dt:.3f} ms "
-        msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
-        pflog.debug(msg)
-
-        dt = (perf_counter_ns() - t0) / 1e6
-        msg = f"Compute tile data in {dt:.3f} ms "
-        msg += f"at {data.size / 1e6 / dt * 1000:.3f} MPix/s"
-        pflog.debug(msg)
+        await asyncio.sleep(0)
 
         # RasterTileData
         resp_data = CARTA.RasterTileData()
@@ -883,12 +846,6 @@ class Session:
 
         x, y, layer = decode_tile_coord(tile)
         tile_height, tile_width = tile_shape
-
-        if precision > compression_quality:
-            pflog.debug(
-                f"Upgraded precision to {precision} "
-                f"(originally requested precision: {compression_quality})."
-            )
 
         # RasterTileData
         resp_data = CARTA.RasterTileData()
