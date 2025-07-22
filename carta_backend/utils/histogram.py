@@ -78,7 +78,6 @@ def numba_histogram(data, bin_edges):
     (nb.float32[:](nb.float32[:])),
     parallel=True,
     fastmath=True,
-    cache=True,
 )
 def numba_minmax_finite(data):
     n = data.size
@@ -135,9 +134,7 @@ def numba_minmax_finite(data):
     return np.array([final_min, final_max])
 
 
-@nb.njit(
-    (nb.float32[:](nb.float32[:])), parallel=True, fastmath=True, cache=True
-)
+@nb.njit((nb.float32[:](nb.float32[:])), parallel=True, fastmath=True)
 def numba_minmax_fast(data):
     n = data.size
     if n == 0:
