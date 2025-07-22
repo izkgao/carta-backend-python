@@ -135,7 +135,9 @@ def numba_minmax_finite(data):
     return np.array([final_min, final_max])
 
 
-@nb.njit((nb.float32[:](nb.float32[:])), parallel=True, fastmath=True)
+@nb.njit(
+    (nb.float32[:](nb.float32[:])), parallel=True, fastmath=True, cache=True
+)
 def numba_minmax_fast(data):
     n = data.size
     if n == 0:
@@ -254,7 +256,7 @@ async def get_histogram_dask(data, client: Client):
     return histogram
 
 
-async def get_histogram_numpy(data: np.ndarray) -> CARTA.Histogram:
+async def get_histogram_numpy(data: np.ndarray[np.float32]) -> CARTA.Histogram:
     # Calculate number of bins
     nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
 
