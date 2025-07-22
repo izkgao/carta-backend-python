@@ -74,6 +74,151 @@ def numba_histogram(data, bin_edges):
     return hist
 
 
+@nb.njit(
+    (nb.float32[:](nb.float32[:])),
+    parallel=True,
+    fastmath=True,
+    cache=True,
+)
+def numba_minmax_finite(data):
+    n = data.size
+    if n == 0:
+        return np.array([np.float32(np.nan), np.float32(np.nan)])
+
+    # Thread-local min/max - use 1D array for better cache behavior
+    n_threads = np.uint32(nb.get_num_threads())
+    thread_mins = np.full(n_threads, np.float32(np.inf))
+    thread_maxs = np.full(n_threads, np.float32(-np.inf))
+
+    # Use power-of-2 chunk size aligned with cache lines
+    chunk_size = max(1024, n // (n_threads * 4))
+
+    # Calculate number of chunks and process them in parallel
+    n_chunks = (n + chunk_size - 1) // chunk_size
+
+    for chunk_idx in nb.prange(n_chunks):
+        thread_id = np.uint64(nb.get_thread_id())
+        i = np.uint64(chunk_idx * chunk_size)
+        end_idx = np.uint64(min(i + chunk_size, n))
+
+        # Process chunk with manual loop unrolling
+        local_min = thread_mins[thread_id]
+        local_max = thread_maxs[thread_id]
+
+        # Process chunk
+        for j in range(i, end_idx):
+            j = np.uint64(j)
+            v = data[j]
+            if not (np.isinf(v) or np.isnan(v)):
+                if v < local_min:
+                    local_min = v
+                if v > local_max:
+                    local_max = v
+
+        thread_mins[thread_id] = local_min
+        thread_maxs[thread_id] = local_max
+
+    # Final reduction
+    final_min = np.float32(np.inf)
+    final_max = np.float32(-np.inf)
+
+    for i in range(n_threads):
+        if thread_mins[i] < final_min:
+            final_min = thread_mins[i]
+        if thread_maxs[i] > final_max:
+            final_max = thread_maxs[i]
+
+    # Handle case where all values were inf/-inf
+    if np.isinf(final_min) and np.isinf(final_max):
+        return np.array([np.float32(np.nan), np.float32(np.nan)])
+
+    return np.array([final_min, final_max])
+
+
+@nb.njit((nb.float32[:](nb.float32[:])), parallel=True, fastmath=True)
+def numba_minmax_fast(data):
+    n = data.size
+    if n == 0:
+        return np.array([np.float32(np.nan), np.float32(np.nan)])
+
+    # Thread-local min/max - use 1D array for better cache behavior
+    n_threads = np.uint32(nb.get_num_threads())
+    thread_mins = np.full(n_threads, np.float32(np.inf))
+    thread_maxs = np.full(n_threads, np.float32(-np.inf))
+
+    # Use power-of-2 chunk size aligned with cache lines
+    chunk_size = max(1024, n // (n_threads * 4))
+
+    # Calculate number of chunks and process them in parallel
+    n_chunks = (n + chunk_size - 1) // chunk_size
+
+    # For uint64 indices
+    one, two, three, four = (
+        np.uint64(1),
+        np.uint64(2),
+        np.uint64(3),
+        np.uint64(4),
+    )
+
+    for chunk_idx in nb.prange(n_chunks):
+        thread_id = np.uint64(nb.get_thread_id())
+        i = np.uint64(chunk_idx * chunk_size)
+        end_idx = np.uint64(min(i + chunk_size, n))
+
+        # Process chunk with manual loop unrolling
+        local_min = thread_mins[thread_id]
+        local_max = thread_maxs[thread_id]
+
+        # Unroll loop by 4 for better instruction-level parallelism
+        while i + three < end_idx:
+            local_min = min(
+                local_min,
+                min(
+                    min(data[i], data[i + one]),
+                    min(data[i + two], data[i + three]),
+                ),
+            )
+            local_max = max(
+                local_max,
+                max(
+                    max(data[i], data[i + one]),
+                    max(data[i + two], data[i + three]),
+                ),
+            )
+            i += four
+
+        # Handle remaining elements
+        while i < end_idx:
+            v = data[i]
+            if v < local_min:
+                local_min = v
+            if v > local_max:
+                local_max = v
+            i += one
+
+        thread_mins[thread_id] = local_min
+        thread_maxs[thread_id] = local_max
+
+    # Final reduction
+    final_min = np.float32(np.inf)
+    final_max = np.float32(-np.inf)
+
+    for i in range(n_threads):
+        if thread_mins[i] < final_min:
+            final_min = thread_mins[i]
+        if thread_maxs[i] > final_max:
+            final_max = thread_maxs[i]
+
+    return np.array([final_min, final_max])
+
+
+def numba_minmax(data: np.ndarray[np.float32]) -> np.ndarray[np.float32]:
+    minmax = numba_minmax_fast(data)
+    if np.isinf(minmax).any():
+        return numba_minmax_finite(data)
+    return minmax
+
+
 async def dask_histogram(data, bins):
     bin_min = da.nanmin(data)
     bin_max = da.nanmax(data)
@@ -114,12 +259,12 @@ async def get_histogram_numpy(data: np.ndarray) -> CARTA.Histogram:
     nbins = int(max(np.sqrt(data.shape[0] * data.shape[1]), 2.0))
 
     # Calculate bin range
-    bin_min, bin_max = np.nanmin(data), np.nanmax(data)
+    data = data.ravel()
+    bin_min, bin_max = numba_minmax(data)
     bin_width = (bin_max - bin_min) / nbins
     bin_edges = np.linspace(bin_min, bin_max, nbins + 1, dtype=np.float32)
 
     # Calculate histogram
-    data = data.ravel()
     if data.size <= 1024**2:
         hist = numba_histogram_single(data, bin_edges)
     else:
