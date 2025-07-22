@@ -880,6 +880,7 @@ def isfinite_f32(x):
 @nb.njit(
     (nb.float32[:, :](nb.float32[:, :], nb.int64)),
     parallel=True,
+    cache=True,
 )
 def block_reduce_numba(arr, factor):
     rows, cols = arr.shape

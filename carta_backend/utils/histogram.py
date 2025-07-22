@@ -14,18 +14,18 @@ pflog = logger.bind(name="Performance")
 ptlog = logger.bind(name="Protocol")
 
 
-@njit(nb.int64[:](nb.float32[:], nb.float32[:]))
+@njit(nb.int64[:](nb.float32[:], nb.float32[:]), fastmath=True, cache=True)
 def numba_histogram_single(data, bin_edges):
     # Precompute constants
     n_bins = bin_edges.size - 1
     bin_min, bin_max = bin_edges[0], bin_edges[-1]
     bin_width = bin_edges[1] - bin_edges[0]
-    max_idx = n_bins - 1
+    max_idx = np.uint64(n_bins - 1)
     hist = np.zeros(n_bins, dtype=np.int64)
 
     for x in data:
-        if not np.isnan(x) and bin_min <= x <= bin_max:
-            bin_idx = int((x - bin_min) / bin_width)
+        if bin_min <= x <= bin_max:
+            bin_idx = np.uint64((x - bin_min) / bin_width)
             bin_idx = min(max_idx, bin_idx)
             hist[bin_idx] += 1
 
@@ -33,34 +33,36 @@ def numba_histogram_single(data, bin_edges):
 
 
 @njit(
-    (nb.int64[:](nb.float32[:], nb.float32[:])), parallel=True, fastmath=True
+    (nb.int64[:](nb.float32[:], nb.float32[:])),
+    parallel=True,
+    fastmath=True,
 )
 def numba_histogram(data, bin_edges):
     # Precompute constants
-    n_bins = bin_edges.size - 1
+    n_bins = np.uint64(bin_edges.size - 1)
     bin_min, bin_max = bin_edges[0], bin_edges[-1]
     bin_width = bin_edges[1] - bin_edges[0]
-    max_idx = n_bins - 1
+    max_idx = np.uint64(n_bins - 1)
 
     # Use thread-local histograms to avoid race conditions
-    n_threads = nb.get_num_threads()
+    n_threads = np.uint64(nb.get_num_threads())
     local_hists = np.zeros((n_threads, n_bins), dtype=np.int64)
 
     # Process data in chunks for better cache locality
-    chunk_size = 1024**2
+    chunk_size = 2**18
     n_chunks = (data.size + chunk_size - 1) // chunk_size
 
     for chunk in nb.prange(n_chunks):
-        thread_id = nb.get_thread_id()
-        start = chunk * chunk_size
-        end = min(start + chunk_size, data.size)
+        thread_id = np.uint64(nb.get_thread_id())
+        start = np.uint64(chunk * chunk_size)
+        end = np.uint64(min(start + chunk_size, data.size))
 
         # Process each chunk
         for i in range(start, end):
             x = data[i]
             # Combine conditions to reduce branching
-            if not np.isnan(x) and x >= bin_min and x <= bin_max:
-                bin_idx = min(max_idx, int((x - bin_min) / bin_width))
+            if x >= bin_min and x <= bin_max:
+                bin_idx = min(max_idx, np.uint64((x - bin_min) / bin_width))
                 local_hists[thread_id, bin_idx] += 1
 
     # Sum up the thread-local histograms
