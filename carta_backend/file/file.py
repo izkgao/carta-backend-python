@@ -918,6 +918,7 @@ class FileManager:
         max_workers: int = 4,
         n_jobs: int = 4,
         use_dask: bool = False,
+        return_future: bool = False,
     ):
         # Load data
         file_type = self.files[file_id].file_type
@@ -938,7 +939,8 @@ class FileManager:
                 dtype=dtype,
                 wcs=wcs,
             )
-            data = await self.client.compute(data)
+            if not return_future:
+                data = await self.client.compute(data)
             return data
 
         if file_type == CARTA.FileType.FITS:

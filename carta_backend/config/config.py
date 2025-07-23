@@ -1,5 +1,8 @@
-TILE_SHAPE = (256, 256)
+# Protocol
 ICD_VERSION = 30
+
+# Tile
+TILE_SHAPE = (256, 256)
 MAX_COMPRESSION_QUALITY = 32
 
 # Spectral profile calculation
@@ -9,5 +12,5 @@ TARGET_PARTIAL_CURSOR_TIME = 500  # milliseconds
 TARGET_PARTIAL_REGION_TIME = 1000  # milliseconds
 
 # I/O
-N_JOBS = 8
+N_JOBS = 4
 N_SEMAPHORE = 4
