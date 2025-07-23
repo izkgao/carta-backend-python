@@ -1,6 +1,7 @@
 import asyncio
 import warnings
 from dataclasses import dataclass
+from itertools import product
 from pathlib import Path
 from time import perf_counter_ns
 from typing import Any, AsyncGenerator, Dict, List, Tuple
@@ -19,6 +20,7 @@ from carta_backend.file.utils import (
     async_read_zarr_channel,
     async_read_zarr_slice,
     block_reduce_numba,
+    compute_slices,
     get_axes_dict,
     get_file_type,
     get_fits_dask_channels_chunks,
@@ -34,6 +36,10 @@ from carta_backend.tile.utils import (
     get_tile_original_slice,
     get_tile_slice,
     layer_to_mip,
+)
+from carta_backend.utils.histogram import (
+    get_block_hist,
+    numba_combine_block_histograms,
 )
 
 clog = logger.bind(name="CARTA")
@@ -1042,6 +1048,85 @@ class FileManager:
 
         stats = await asyncio.to_thread(_get_stats, data)
         return stats
+
+    async def async_get_histogram(
+        self,
+        file_id: str,
+        channel: int,
+        stokes: int = 0,
+        time: int = 0,
+        semaphore: asyncio.Semaphore | None = None,
+        max_workers: int = 4,
+        use_dask: bool = False,
+    ):
+        file_type = self.files[file_id].file_type
+        image_shape = self.files[file_id].img_shape
+        block_shape = (2048, 2048)
+        # nbins = int(
+        #     min(max(np.sqrt(image_shape[0] * image_shape[1]), 2.0), 10000)
+        # )
+        nbins = int(max(np.sqrt(image_shape[0] * image_shape[1]), 2.0))
+        dtype = np.float32
+
+        if semaphore is None:
+            semaphore = asyncio.Semaphore(max_workers)
+
+        if file_type == CARTA.FileType.FITS:
+            wcs = self.files[file_id].wcs
+            memmap_info = self.files[file_id].memmap_info
+            slices_y, slices_x = compute_slices(image_shape, block_shape)
+
+            async def calc_single_hist(sy, sx):
+                memmap = np.memmap(**memmap_info)
+                async with semaphore:
+                    data = await asyncio.to_thread(
+                        load_data,
+                        data=memmap,
+                        x=sx,
+                        y=sy,
+                        channel=channel,
+                        stokes=stokes,
+                        time=time,
+                        wcs=wcs,
+                        dtype=dtype,
+                    )
+                res = await asyncio.to_thread(
+                    get_block_hist, data, block_shape[0]
+                )
+                return res
+
+            tasks = [
+                calc_single_hist(sy, sx)
+                for sy, sx in product(slices_y, slices_x)
+            ]
+
+            hists = np.empty((len(tasks), block_shape[0] * 2 + 2), dtype=dtype)
+
+            for i, task in enumerate(asyncio.as_completed(tasks)):
+                result = await task
+                hists[i] = result
+
+            bin_min = np.nanmin(hists[:, -2])
+            bin_max = np.nanmax(hists[:, -1])
+            bin_width = (bin_max - bin_min) / nbins
+            bin_edges = np.linspace(bin_min, bin_max, nbins + 1, dtype=dtype)
+            bin_centers = bin_edges[:-1] + bin_width / 2
+
+            hist = numba_combine_block_histograms(hists, bin_edges)
+
+            mean = np.sum(hist * bin_centers) / np.sum(hist)
+            std_dev = np.sqrt(
+                np.sum(hist * (bin_centers - mean) ** 2) / np.sum(hist)
+            )
+
+        histogram = CARTA.Histogram()
+        histogram.num_bins = nbins
+        histogram.bin_width = bin_width
+        histogram.first_bin_center = bin_centers[0]
+        histogram.bins.extend(hist)
+        histogram.mean = mean
+        histogram.std_dev = std_dev
+        return histogram
 
     def _clear_cache(self, cache_dict, file_id):
         for key in list(cache_dict.keys()):

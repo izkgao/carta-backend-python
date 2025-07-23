@@ -1698,3 +1698,16 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
         chunks=normalized_chunks,
         drop_axis=list(range(len(chunk_grid_shape), len(slice_dask.shape))),
     )
+
+
+def compute_slices(array_shape, block_shape):
+    slices = []
+    for dim_size, block_size in zip(array_shape, block_shape):
+        dim_slices = []
+        start = 0
+        while start < dim_size:
+            end = min(start + block_size, dim_size)
+            dim_slices.append(slice(start, end))
+            start = end
+        slices.append(dim_slices)
+    return slices

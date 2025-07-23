@@ -75,6 +75,52 @@ def numba_histogram(data, bin_edges):
 
 
 @nb.njit(
+    (nb.int64[:](nb.float32[:, :], nb.float32[:])),
+    parallel=True,
+    fastmath=True,
+)
+def numba_combine_block_histograms(hists, bin_edges):
+    # Precompute constants
+    n_bins = np.uint64(bin_edges.size - 1)
+    bin_min, bin_max = bin_edges[0], bin_edges[-1]
+    bin_width = bin_edges[1] - bin_edges[0]
+    max_idx = np.uint64(n_bins - 1)
+    block_size = (hists.shape[1] - 2) // 2
+
+    # Use thread-local histograms to avoid race conditions
+    n_threads = np.uint64(nb.get_num_threads())
+    local_hists = np.zeros((n_threads, n_bins), dtype=np.int64)
+
+    # Process data in chunks for better cache locality
+    chunk_size = hists.shape[0] // n_threads + 1
+
+    for batch in nb.prange(n_threads):
+        thread_id = np.uint64(nb.get_thread_id())
+        start = np.uint64(batch * chunk_size)
+        end = np.uint64(min(start + chunk_size, hists.shape[0]))
+
+        # Process each chunk
+        for i in range(start, end):
+            for j in range(block_size):
+                x = hists[i, j + block_size]
+                num = np.int64(hists[i, j])
+                # Combine conditions to reduce branching
+                if num != 0 and x >= bin_min and x <= bin_max:
+                    bin_idx = min(
+                        max_idx, np.uint64((x - bin_min) / bin_width)
+                    )
+                    local_hists[thread_id, bin_idx] += num
+
+    # Sum up the thread-local histograms
+    hist = np.zeros(n_bins, dtype=np.int64)
+    for t in range(n_threads):
+        for b in range(n_bins):
+            hist[b] += local_hists[t, b]
+
+    return hist
+
+
+@nb.njit(
     (nb.float32[:](nb.float32[:])),
     parallel=True,
     fastmath=True,
@@ -216,6 +262,24 @@ def numba_minmax(data: np.ndarray[np.float32]) -> np.ndarray[np.float32]:
     if np.isinf(minmax).any():
         return numba_minmax_finite(data)
     return minmax
+
+
+def get_block_hist(data, block_size=2048):
+    # Get min and max
+    vmin, vmax = numba_minmax(data.ravel())
+
+    # If min and max are the same or not finite, return None
+    if (vmin == vmax) or ~np.isfinite(vmin) or ~np.isfinite(vmax):
+        return None
+
+    # Get bin edges and bin centers
+    bin_edges = np.linspace(vmin, vmax, block_size + 1)
+    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+    # Get histogram
+    hist = numba_histogram(data.ravel(), bin_edges)
+    res = np.hstack([hist, bin_centers, [vmin, vmax]], dtype=np.float32)
+    return res
 
 
 async def dask_histogram(data, bins):

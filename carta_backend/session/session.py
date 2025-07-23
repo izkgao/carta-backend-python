@@ -498,6 +498,9 @@ class Session:
         await self.send_RegionHistogramData(
             request_id=0, file_id=file_id, region_id=-1, channel=0, stokes=0
         )
+        # await self.send_RegionHistogramData_v2(
+        #     request_id=0, file_id=file_id, region_id=-1, channel=0, stokes=0
+        # )
 
         return None
 
@@ -571,6 +574,59 @@ class Session:
         dt = (perf_counter_ns() - t0) / 1e6
         mpix_s = data.size / 1e6 / dt * 1000
         msg = f"Fill image histogram in {dt:.3f} ms at {mpix_s:.3f} MPix/s"
+        pflog.debug(msg)
+
+        self.queue.put_nowait(message)
+
+        # Mark histogram as ready
+        self.fm.files[file_id].hist_event.set()
+
+        return None
+
+    async def send_RegionHistogramData_v2(
+        self,
+        request_id: int,
+        file_id: int,
+        region_id: int,
+        channel: int = 0,
+        stokes: int = 0,
+    ) -> None:
+        """
+        This executes when the image is first loaded and
+        when channel/stokes changes.
+        """
+        # RegionHistogramData
+        # Not fully implemented
+        t0 = perf_counter_ns()
+        response = CARTA.RegionHistogramData()
+        response.file_id = file_id
+        response.region_id = region_id
+        response.channel = channel
+        response.stokes = stokes
+        response.progress = 1.0
+
+        # Set histogram config
+        config = CARTA.HistogramConfig()
+        config.num_bins = -1
+        config.bounds.CopyFrom(CARTA.DoubleBounds())
+        response.config.CopyFrom(config)
+
+        # Calculate histogram
+        histogram = await self.fm.async_get_histogram(
+            file_id=file_id,
+            channel=channel,
+            stokes=stokes,
+            time=0,
+            semaphore=self.semaphore,
+        )
+        response.histograms.CopyFrom(histogram)
+
+        # Send message
+        event_type = CARTA.EventType.REGION_HISTOGRAM_DATA
+        message = self.encode_message(event_type, request_id, response)
+
+        dt = (perf_counter_ns() - t0) / 1e6
+        msg = f"Fill image histogram in {dt:.3f} ms"
         pflog.debug(msg)
 
         self.queue.put_nowait(message)
