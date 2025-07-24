@@ -525,7 +525,7 @@ class Session:
             stokes=stokes,
             time=0,
             memmap=None,
-            dtype=None,
+            dtype=np.float32,
             semaphore=self.semaphore,
             # Use self.use_dask instead of file.use_dask
             # because file.use_dask may be changed after this
@@ -702,6 +702,7 @@ class Session:
                 stokes=stokes,
                 time=0,
                 layer=layer,
+                dtype=np.float32,
                 semaphore=self.semaphore,
                 use_dask=False,
             )
@@ -1235,6 +1236,7 @@ class Session:
             channel,
             stokes,
             mip=mip,
+            dtype=np.float32,
             semaphore=self.semaphore,
             use_dask=use_dask,
             return_future=True,

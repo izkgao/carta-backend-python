@@ -183,12 +183,12 @@ class FileManager:
             )
         else:
             if file_type == CARTA.FileType.FITS:
-                if memmap is None:
-                    memmap_info = self.files[file_id].memmap_info
-                    memmap = np.memmap(**memmap_info)
+                memmap_info = self.files[file_id].memmap_info
                 data = await asyncio.to_thread(
                     load_data,
-                    data=memmap,
+                    data=memmap
+                    if memmap is not None
+                    else np.memmap(**memmap_info),
                     x=None,
                     y=None,
                     channel=channel,
@@ -209,17 +209,7 @@ class FileManager:
                     max_workers=max_workers,
                 )
 
-        # Convert to float32 to avoid using dtype >f4
-        if isinstance(data, np.ndarray):
-            data = np.asarray(data)
-            if data.dtype != np.float32:
-                t0 = perf_counter_ns()
-                data = data.astype(np.float32, copy=False)
-                dt = (perf_counter_ns() - t0) / 1e6
-                msg = f"Converted to float32 in {dt:.3f} ms"
-                clog.debug(msg)
-        else:
-            data = data.astype(np.float32, copy=False)
+        if isinstance(data, da.Array):
             if not return_future:
                 data = await self.client.compute(data)
 
@@ -427,14 +417,14 @@ class FileManager:
             return data
 
         if file_type == CARTA.FileType.FITS:
-            if memmap is None:
-                memmap_info = self.files[file_id].memmap_info
-                memmap = np.memmap(**memmap_info)
+            memmap_info = self.files[file_id].memmap_info
 
             if isinstance(channel, int):
                 data = await asyncio.to_thread(
                     load_data,
-                    data=memmap,
+                    data=memmap
+                    if memmap is not None
+                    else np.memmap(**memmap_info),
                     x=x,
                     y=y,
                     channel=channel,
@@ -452,7 +442,9 @@ class FileManager:
                     async with semaphore:
                         return await asyncio.to_thread(
                             load_data,
-                            data=memmap,
+                            data=memmap
+                            if memmap is not None
+                            else np.memmap(**memmap_info),
                             x=x,
                             y=y,
                             channel=ichannel,
@@ -950,9 +942,7 @@ class FileManager:
             return data
 
         if file_type == CARTA.FileType.FITS:
-            if memmap is None:
-                memmap_info = self.files[file_id].memmap_info
-                memmap = np.memmap(**memmap_info)
+            memmap_info = self.files[file_id].memmap_info
 
             if channel is None:
                 channel = slice(0, full_channel_size)
@@ -974,7 +964,9 @@ class FileManager:
                 async with semaphore:
                     return await asyncio.to_thread(
                         load_data,
-                        data=memmap,
+                        data=memmap
+                        if memmap is not None
+                        else np.memmap(**memmap_info),
                         x=x,
                         y=y,
                         channel=ichannel,
@@ -1077,11 +1069,10 @@ class FileManager:
             slices_y, slices_x = compute_slices(image_shape, block_shape)
 
             async def calc_single_hist(sy, sx):
-                memmap = np.memmap(**memmap_info)
                 async with semaphore:
                     data = await asyncio.to_thread(
                         load_data,
-                        data=memmap,
+                        data=np.memmap(**memmap_info),
                         x=sx,
                         y=sy,
                         channel=channel,

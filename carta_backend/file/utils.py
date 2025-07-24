@@ -772,9 +772,8 @@ def load_fits_data(
     result = data[tuple(slices)]
 
     if isinstance(result, np.memmap):
-        result = np.asarray(result)
-
-    if dtype is not None:
+        result = np.array(result, dtype=dtype, copy=True)
+    elif dtype is not None:
         result = result.astype(dtype, copy=False)
     return result
 
