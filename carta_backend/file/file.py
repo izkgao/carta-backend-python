@@ -18,6 +18,7 @@ from zarr.core.array import AsyncArray
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
 from carta_backend.file.utils import (
+    async_load_data,
     async_read_zarr_channel,
     async_read_zarr_slice,
     block_reduce_numba,
@@ -26,7 +27,6 @@ from carta_backend.file.utils import (
     get_file_type,
     get_fits_dask_channels_chunks,
     get_header_from_zarr,
-    load_data,
     mmap_dask_array,
 )
 from carta_backend.log import logger
@@ -110,6 +110,8 @@ class FileManager:
             clog.error(f"File ID '{file_id}' already exists.")
             return None
 
+        file_path = Path(file_path)
+
         file_type = get_file_type(file_path)
 
         if file_type == CARTA.FileType.FITS:
@@ -166,36 +168,35 @@ class FileManager:
 
         # Load data
         file_type = self.files[file_id].file_type
-        wcs = self.files[file_id].wcs
+        array_axes_dict = self.files[file_id].array_axes_dict
 
         if use_dask:
             # Can be FITS or Zarr
             clog.debug("Using dask to load channel")
             _data = self.files[file_id].dask_channels
-            data = load_data(
+            data = await async_load_data(
                 data=_data,
+                array_axes_dict=array_axes_dict,
                 x=None,
                 y=None,
                 channel=channel,
                 stokes=stokes,
                 time=time,
-                wcs=wcs,
                 dtype=dtype,
             )
         else:
             if file_type == CARTA.FileType.FITS:
                 memmap_info = self.files[file_id].memmap_info
-                data = await asyncio.to_thread(
-                    load_data,
+                data = await async_load_data(
                     data=memmap
                     if memmap is not None
                     else np.memmap(**memmap_info),
+                    array_axes_dict=array_axes_dict,
                     x=None,
                     y=None,
                     channel=channel,
                     stokes=stokes,
                     time=time,
-                    wcs=wcs,
                     dtype=dtype,
                 )
             elif file_type == CARTA.FileType.CASA:
@@ -382,7 +383,7 @@ class FileManager:
         return_future: bool = False,
     ):
         file_type = self.files[file_id].file_type
-        wcs = self.files[file_id].wcs
+        array_axes_dict = self.files[file_id].array_axes_dict
         full_channel_size = self.files[file_id].sizes["frequency"]
 
         if x is None:
@@ -403,15 +404,15 @@ class FileManager:
             semaphore = asyncio.Semaphore(max_workers)
 
         if use_dask:
-            data = load_data(
+            data = await async_load_data(
                 data=self.files[file_id].data,
+                array_axes_dict=array_axes_dict,
                 x=x,
                 y=y,
                 channel=channel,
                 stokes=stokes,
                 time=time,
                 dtype=dtype,
-                wcs=wcs,
             )
             if not return_future:
                 data = await self.client.compute(data)
@@ -421,16 +422,15 @@ class FileManager:
             memmap_info = self.files[file_id].memmap_info
 
             if isinstance(channel, int):
-                data = await asyncio.to_thread(
-                    load_data,
+                data = await async_load_data(
                     data=memmap
                     if memmap is not None
                     else np.memmap(**memmap_info),
+                    array_axes_dict=array_axes_dict,
                     x=x,
                     y=y,
                     channel=channel,
                     stokes=stokes,
-                    wcs=wcs,
                     dtype=dtype,
                 )
             else:
@@ -441,16 +441,15 @@ class FileManager:
                         channel.start + (i + 1) * channel_size // n_jobs,
                     )
                     async with semaphore:
-                        return await asyncio.to_thread(
-                            load_data,
+                        return await async_load_data(
                             data=memmap
                             if memmap is not None
                             else np.memmap(**memmap_info),
+                            array_axes_dict=array_axes_dict,
                             x=x,
                             y=y,
                             channel=ichannel,
                             stokes=stokes,
-                            wcs=wcs,
                             dtype=dtype,
                         )
 
@@ -921,22 +920,22 @@ class FileManager:
     ):
         # Load data
         file_type = self.files[file_id].file_type
-        wcs = self.files[file_id].wcs
+        array_axes_dict = self.files[file_id].array_axes_dict
         full_channel_size = self.files[file_id].sizes["frequency"]
 
         if semaphore is None:
             semaphore = asyncio.Semaphore(max_workers)
 
         if use_dask:
-            data = load_data(
+            data = await async_load_data(
                 data=self.files[file_id].data,
+                array_axes_dict=array_axes_dict,
                 x=x,
                 y=y,
                 channel=channel,
                 stokes=stokes,
                 time=time,
                 dtype=dtype,
-                wcs=wcs,
             )
             if not return_future:
                 data = await self.client.compute(data)
@@ -963,16 +962,15 @@ class FileManager:
                     start + (i + 1) * channel_size // n_jobs,
                 )
                 async with semaphore:
-                    return await asyncio.to_thread(
-                        load_data,
+                    return await async_load_data(
                         data=memmap
                         if memmap is not None
                         else np.memmap(**memmap_info),
+                        array_axes_dict=array_axes_dict,
                         x=x,
                         y=y,
                         channel=ichannel,
                         stokes=stokes,
-                        wcs=wcs,
                         dtype=dtype,
                     )
 
@@ -1065,21 +1063,20 @@ class FileManager:
             semaphore = asyncio.Semaphore(max_workers)
 
         if file_type == CARTA.FileType.FITS:
-            wcs = self.files[file_id].wcs
+            array_axes_dict = self.files[file_id].array_axes_dict
             memmap_info = self.files[file_id].memmap_info
             slices_y, slices_x = compute_slices(image_shape, block_shape)
 
             async def calc_single_hist(sy, sx):
                 async with semaphore:
-                    data = await asyncio.to_thread(
-                        load_data,
+                    data = await async_load_data(
                         data=np.memmap(**memmap_info),
+                        array_axes_dict=array_axes_dict,
                         x=sx,
                         y=sy,
                         channel=channel,
                         stokes=stokes,
                         time=time,
-                        wcs=wcs,
                         dtype=dtype,
                     )
                 res = await asyncio.to_thread(
@@ -1181,13 +1178,13 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         "l": shape[array_axes_dict["x"]],
         "m": shape[array_axes_dict["y"]],
         "frequency": shape[array_axes_dict["channel"]]
-        if array_axes_dict["channel"] is not None
+        if "channel" in array_axes_dict
         else None,
         "stokes": shape[array_axes_dict["stokes"]]
-        if array_axes_dict["stokes"] is not None
+        if "stokes" in array_axes_dict
         else None,
         "time": shape[array_axes_dict["time"]]
-        if array_axes_dict["time"] is not None
+        if "time" in array_axes_dict
         else None,
     }
 
@@ -1285,6 +1282,10 @@ async def get_zarr_FileData(file_id, file_path):
     img_shape = [sizes["m"], sizes["l"]]
     array_axes_dict = get_array_axes_dict(header)
 
+    # Create dask array
+    data = da.from_zarr(file_path / "SKY")
+    data = data.swapaxes(3, 4)
+
     # Log file information in separate parts to avoid
     # formatting conflicts
     clog.debug(f"File ID {file_id} opened successfully.")
@@ -1303,8 +1304,8 @@ async def get_zarr_FileData(file_id, file_path):
 
     filedata = FileData(
         file_path=Path(file_path),
-        data=sky,
-        dask_channels=sky,
+        data=data,
+        dask_channels=data,
         memmap_info=None,
         header=header,
         wcs=wcs,

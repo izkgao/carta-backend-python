@@ -3,7 +3,7 @@ import json
 import os
 from itertools import product
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Dict, Optional, Tuple, Union
 
 import aiofiles
 import dask.array as da
@@ -15,6 +15,7 @@ from astropy.time import Time
 from astropy.wcs import WCS
 from dask import delayed
 from numcodecs import get_codec
+from xarray import Dataset
 from zarr.core.array import AsyncArray
 
 from carta_backend import proto as CARTA
@@ -168,25 +169,19 @@ def get_axes_dict(hdr):
 
 
 def get_array_axes_dict(hdr):
-    axes_dict = {
-        "x": None,
-        "y": None,
-        "channel": None,
-        "stokes": None,
-        "time": None,
-    }
+    axes_dict = {}
     naxis = hdr["NAXIS"]
     for i in range(1, naxis + 1):
         if hdr[f"CTYPE{i}"].startswith("RA"):
-            axes_dict["x"] = naxis - i - 1
+            axes_dict["x"] = naxis - i
         elif hdr[f"CTYPE{i}"].startswith("DEC"):
-            axes_dict["y"] = naxis - i - 1
+            axes_dict["y"] = naxis - i
         elif hdr[f"CTYPE{i}"].startswith("STOKES"):
-            axes_dict["stokes"] = naxis - i - 1
+            axes_dict["stokes"] = naxis - i
         elif hdr[f"CTYPE{i}"].startswith("FREQ"):
-            axes_dict["channel"] = naxis - i - 1
+            axes_dict["channel"] = naxis - i
         elif hdr[f"CTYPE{i}"].startswith("TIME"):
-            axes_dict["time"] = naxis - i - 1
+            axes_dict["time"] = naxis - i
     return axes_dict
 
 
@@ -1024,7 +1019,7 @@ def load_data(
             dtype=dtype,
         )
     # Xarray Dataset from Xradio
-    elif isinstance(data, AsyncArray):
+    elif isinstance(data, Dataset):
         return load_xradio_data(
             ds=data,
             x=x,
@@ -1037,6 +1032,55 @@ def load_data(
     else:
         clog.error(f"Unsupported data type: {type(data)}")
         return None
+
+
+async def async_load_data(
+    data,
+    array_axes_dict: Dict[str, int] | None = None,
+    x=None,
+    y=None,
+    channel=None,
+    stokes=None,
+    time=0,
+    dtype=None,
+) -> np.ndarray | da.Array | AsyncArray:
+    # Convert None to slice(None) for proper indexing
+    x_slice = slice(None) if x is None else x
+    y_slice = slice(None) if y is None else y
+    channel_slice = slice(None) if channel is None else channel
+    stokes_slice = slice(None) if stokes is None else stokes
+    time_slice = slice(None) if time is None else time
+
+    # Create a tuple of slices
+    slices = [slice(None)] * data.ndim
+
+    for axis, idx in array_axes_dict.items():
+        if axis == "x":
+            slices[idx] = x_slice
+        elif axis == "y":
+            slices[idx] = y_slice
+        elif axis == "channel":
+            slices[idx] = channel_slice
+        elif axis == "stokes":
+            slices[idx] = stokes_slice
+        elif axis == "time":
+            slices[idx] = time_slice
+
+    slices = tuple(slices)
+
+    # Apply the slices to the data
+    if isinstance(data, AsyncArray):
+        result = await data.getitem(slices)
+    else:
+        result = data[slices]
+
+    if isinstance(result, np.memmap):
+        result = await asyncio.to_thread(
+            np.array, result, dtype=dtype, copy=True
+        )
+    elif dtype is not None:
+        result = result.astype(dtype, copy=False)
+    return result
 
 
 @nb.njit((nb.bool(nb.float32)), fastmath=True)
