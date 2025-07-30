@@ -1,10 +1,10 @@
 import argparse
-import asyncio
 import os
 import sys
 from importlib.metadata import version as get_version
 from uuid import uuid4
 
+os.environ["KMP_WARNINGS"] = "FALSE"
 os.environ["NUMBA_THREADING_LAYER"] = "omp"
 
 import dask.config
@@ -272,10 +272,14 @@ def main():
         use_dask=args.use_dask,
     )
 
-    import uvloop
+    # Use uvloop on Linux and macOS, winloop on Windows
+    if sys.platform in ["linux", "darwin"]:
+        import uvloop as async_loop
+    else:
+        import winloop as async_loop
 
     try:
-        uvloop.run(
+        async_loop.run(
             server.start(
                 open_browser=not args.no_browser,
             )
