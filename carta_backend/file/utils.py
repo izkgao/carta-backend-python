@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import warnings
 from itertools import product
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
@@ -9,16 +10,17 @@ import aiofiles
 import dask.array as da
 import numba as nb
 import numpy as np
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import Angle, SkyCoord
 from astropy.io import fits
 from astropy.time import Time
-from astropy.wcs import WCS
+from astropy.wcs import WCS, FITSFixedWarning
 from dask import delayed
 from numcodecs import get_codec
 from xarray import Dataset
 from zarr.core.array import AsyncArray
 
 from carta_backend import proto as CARTA
+from carta_backend.config.config import CHUNK_SIZE
 from carta_backend.log import logger
 from carta_backend.utils import async_get_folder_size, get_folder_size
 
@@ -156,6 +158,8 @@ def get_directory_info(path: Union[str, Path]) -> CARTA.DirectoryInfo:
 
 def get_axes_dict(hdr):
     axes_dict = {}
+    if "CTYPE1" not in hdr:
+        return axes_dict
     for i in range(1, hdr["NAXIS"] + 1):
         if hdr[f"CTYPE{i}"].startswith("RA"):
             axes_dict["RA"] = i - 1
@@ -170,6 +174,8 @@ def get_axes_dict(hdr):
 
 def get_array_axes_dict(hdr):
     axes_dict = {}
+    if "CTYPE1" not in hdr:
+        return axes_dict
     naxis = hdr["NAXIS"]
     for i in range(1, naxis + 1):
         if hdr[f"CTYPE{i}"].startswith("RA"):
@@ -216,8 +222,6 @@ def get_computed_entries(hdr, hdu_index, file_name):
     computed_entries = []
 
     axes_dict = get_axes_dict(hdr)
-    x_num = axes_dict["RA"] + 1
-    y_num = axes_dict["DEC"] + 1
 
     h = CARTA.HeaderEntry()
     h.name = "Name"
@@ -247,7 +251,10 @@ def get_computed_entries(hdr, hdu_index, file_name):
     names = []
     for i in range(1, hdr["NAXIS"] + 1):
         shape.append(hdr[f"NAXIS{i}"])
-        names.append(hdr[f"CTYPE{i}"].split("-")[0].strip())
+        if f"CTYPE{i}" in hdr:
+            names.append(hdr[f"CTYPE{i}"].split("-")[0].strip())
+        else:
+            names.append("N/A")
     names = ", ".join(names)
     h.value = f"{str(shape)} ({names})"
     computed_entries.append(h)
@@ -276,22 +283,31 @@ def get_computed_entries(hdr, hdu_index, file_name):
     h.value = "Right Ascension, Declination"
     computed_entries.append(h)
 
-    h = CARTA.HeaderEntry()
-    h.name = "Projection"
-    h.value = hdr[f"CTYPE{x_num}"].split("-")[-1].strip()
-    computed_entries.append(h)
+    if "RA" in axes_dict:
+        x_num = axes_dict["RA"] + 1
+    else:
+        x_num = None
 
-    try:
+    if "DEC" in axes_dict:
+        y_num = axes_dict["DEC"] + 1
+    else:
+        y_num = None
+
+    if x_num is not None:
+        h = CARTA.HeaderEntry()
+        h.name = "Projection"
+        h.value = hdr[f"CTYPE{x_num}"].replace("RA---", "")
+        computed_entries.append(h)
+
+    if x_num is not None and y_num is not None:
         h = CARTA.HeaderEntry()
         h.name = "Image reference pixels"
-        hx = int(hdr[f"CRPIX{x_num}"])
-        hy = int(hdr[f"CRPIX{y_num}"])
+        hx = round(hdr[f"CRPIX{x_num}"], 6)
+        hy = round(hdr[f"CRPIX{y_num}"], 6)
         h.value = f"[{hx}, {hy}]"
         computed_entries.append(h)
-    except KeyError:
-        pass
 
-    try:
+    if x_num is not None and y_num is not None:
         h = CARTA.HeaderEntry()
         h.name = "Image reference coords"
         coord = SkyCoord(
@@ -300,40 +316,39 @@ def get_computed_entries(hdr, hdu_index, file_name):
         coords = coord.to_string("hmsdms", sep=":", precision=4).split()
         h.value = f"[{coords[0]}, {coords[1]}]"
         computed_entries.append(h)
-    except KeyError:
-        pass
 
-    try:
+    if x_num is not None and y_num is not None:
         h = CARTA.HeaderEntry()
         h.name = "Image ref coords (deg)"
-        hx = hdr[f"CRVAL{x_num}"]
-        hy = hdr[f"CRVAL{y_num}"]
-        h.value = f"[{hx:.4f} deg, {hy:.4f} deg]"
+        hx = round(hdr[f"CRVAL{x_num}"], 6)
+        hy = round(hdr[f"CRVAL{y_num}"], 6)
+        h.value = f"[{hx:.3f} deg, {hy:.3f} deg]"
         computed_entries.append(h)
-    except KeyError:
-        pass
 
-    try:
-        h = CARTA.HeaderEntry()
-        h.name = "Pixel increment"
-        hx = hdr[f"CDELT{x_num}"] * 3600
-        hy = hdr[f"CDELT{y_num}"] * 3600
-        h.value = f'{hx}", {hy}"'
-        computed_entries.append(h)
-    except KeyError:
-        pass
+    if x_num is not None and y_num is not None:
+        try:
+            h = CARTA.HeaderEntry()
+            h.name = "Pixel increment"
+            hx = round(hdr[f"CDELT{x_num}"] * 3600, 6)
+            hy = round(hdr[f"CDELT{y_num}"] * 3600, 6)
+            h.value = f'{hx}", {hy}"'
+            computed_entries.append(h)
+        except KeyError:
+            pass
 
-    try:
+    if "BUNIT" in hdr:
         h = CARTA.HeaderEntry()
         h.name = "Pixel unit"
         h.value = hdr["BUNIT"]
         computed_entries.append(h)
-    except KeyError:
-        pass
 
-    try:
-        h = CARTA.HeaderEntry()
-        h.name = "Celestial frame"
+    h = CARTA.HeaderEntry()
+    h.name = "Celestial frame"
+    value = ""
+    if "RADESYS" in hdr:
+        value += f"{hdr['RADESYS']}"
+
+    if "EQUINOX" in hdr:
         eq = hdr["EQUINOX"]
         if isinstance(eq, str):
             pass
@@ -341,31 +356,33 @@ def get_computed_entries(hdr, hdu_index, file_name):
             eq = f"B{eq}"
         else:
             eq = f"J{eq}"
-        if "RADESYS" in hdr:
-            value = f"{hdr['RADESYS']}, {eq}"
-        else:
-            value = eq
-        h.value = value
+        if len(value) > 0:
+            value += ", "
+        value += eq
+
+    h.value = value
+    computed_entries.append(h)
+
+    if "SPECSYS" in hdr:
+        h = CARTA.HeaderEntry()
+        h.name = "Spectral frame"
+        h.value = hdr["SPECSYS"]
         computed_entries.append(h)
-    except KeyError:
-        pass
 
-    h = CARTA.HeaderEntry()
-    h.name = "Spectral frame"
-    h.value = hdr.get("SPECSYS", "")
-    computed_entries.append(h)
-
-    # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "Velocity definition"
-    h.value = "RADIO"
-    computed_entries.append(h)
+    if "VELREF" in hdr:
+        h = CARTA.HeaderEntry()
+        h.name = "Velocity definition"
+        if hdr["VELREF"] > 256:
+            h.value = "RADIO"
+        else:
+            h.value = "OPTICAL"
+        computed_entries.append(h)
 
     if "BMAJ" in hdr:
         try:
-            bmaj = hdr["BMAJ"] * 3600
-            bmin = hdr["BMIN"] * 3600
-            bpa = hdr["BPA"]
+            bmaj = round(hdr["BMAJ"] * 3600, 6)
+            bmin = round(hdr["BMIN"] * 3600, 6)
+            bpa = round(hdr["BPA"], 6)
             value = f'{bmaj}" X {bmin}", {bpa} deg'
             h = CARTA.HeaderEntry()
             h.name = "Restoring beam"
@@ -374,39 +391,178 @@ def get_computed_entries(hdr, hdu_index, file_name):
         except KeyError:
             pass
 
-    # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "RA range"
-    h.value = ""
-    computed_entries.append(h)
+    # Calculate RA range
+    try:
+        # Create WCS object for coordinate transformation
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FITSFixedWarning)
+            wcs = WCS(hdr).celestial
 
-    # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "DEC range"
-    h.value = ""
-    computed_entries.append(h)
+        # Check if WCS has valid array shape
+        ny, nx = wcs.array_shape
 
-    # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "Frequency range"
-    h.value = ""
-    computed_entries.append(h)
+        # Calculate corner coordinates
+        corners_pix = np.array(
+            [
+                [0, 0],  # bottom-left
+                [0, nx - 1],  # bottom-right
+                [ny - 1, 0],  # top-left
+                [ny - 1, nx - 1],  # top-right
+            ]
+        )
 
-    # Not implement yet
-    h = CARTA.HeaderEntry()
-    h.name = "Velocity range"
-    h.value = ""
-    computed_entries.append(h)
+        # Convert to world coordinates
+        corners_world = wcs.pixel_to_world(
+            corners_pix[:, 1], corners_pix[:, 0]
+        )
+        corners_world = corners_world.to_string("hmsdms", sep=":", precision=3)
 
-    # Not implement yet
-    # h = CARTA.HeaderEntry()
-    # h.name = "Stokes coverage"
-    # if "STOKES" in hdr["CTYPE4"].upper():
-    #     value = "[I]"
-    # else:
-    #     value = ""
-    # h.value = value
-    # computed_entries.append(h)
+        # Parse RA and DEC coordinates with validation
+        ra_coords = []
+        dec_coords = []
+        for coord_str in corners_world:
+            coord_parts = coord_str.split()
+            if len(coord_parts) >= 2:
+                ra_coords.append(coord_parts[0])
+                dec_coords.append(coord_parts[1])
+
+        # Only proceed if we have valid coordinates
+        if not ra_coords or not dec_coords:
+            raise ValueError("Unable to parse coordinate strings")
+
+        ra_coords = sorted(ra_coords)
+        dec_coords = sorted(
+            dec_coords,
+            key=lambda d: Angle(d, unit="deg").deg,
+        )
+
+        h = CARTA.HeaderEntry()
+        h.name = "RA range"
+        h.value = f"[{ra_coords[0]}, {ra_coords[-1]}]"
+        computed_entries.append(h)
+
+        h = CARTA.HeaderEntry()
+        h.name = "DEC range"
+        h.value = f"[{dec_coords[0]}, {dec_coords[-1]}]"
+        computed_entries.append(h)
+    except Exception:
+        pass
+
+    # Calculate Frequency range
+    if "FREQ" in axes_dict:
+        try:
+            freq_axis = axes_dict["FREQ"] + 1
+            nfreq = hdr[f"NAXIS{freq_axis}"]
+            crval = hdr.get(f"CRVAL{freq_axis}", 0)
+            cdelt = hdr.get(f"CDELT{freq_axis}", 1)
+            crpix = hdr.get(f"CRPIX{freq_axis}", 1)
+
+            # Calculate frequency at first and last pixels
+            freq_min = crval + (1 - crpix) * cdelt
+            freq_max = crval + (nfreq - crpix) * cdelt
+
+            # Ensure min < max
+            if freq_min > freq_max:
+                freq_min, freq_max = freq_max, freq_min
+
+            # Format frequency range (assume Hz)
+            if freq_max > 1e9:  # GHz
+                h = CARTA.HeaderEntry()
+                h.name = "Frequency range"
+                h.value = f"[{freq_min / 1e9:.4f}, {freq_max / 1e9:.4f}] (GHz)"
+                computed_entries.append(h)
+            elif freq_max > 1e6:  # MHz
+                h = CARTA.HeaderEntry()
+                h.name = "Frequency range"
+                h.value = f"[{freq_min / 1e6:.4f}, {freq_max / 1e6:.4f}] (MHz)"
+                computed_entries.append(h)
+            else:  # Hz
+                h = CARTA.HeaderEntry()
+                h.name = "Frequency range"
+                h.value = f"[{freq_min:.4f}, {freq_max:.4f}] (Hz)"
+                computed_entries.append(h)
+
+            # Calculate Velocity range (radio definition: v = c * (f0 - f) / f0)
+            # Need rest frequency for velocity calculation
+            rest_freq = hdr.get("RESTFRQ", hdr.get("RESTFREQ", None))
+            if rest_freq and rest_freq > 0:
+                c = 299792458.0  # speed of light in m/s
+                vel_min = c * (rest_freq - freq_max) / rest_freq / 1000  # km/s
+                vel_max = c * (rest_freq - freq_min) / rest_freq / 1000  # km/s
+
+                h = CARTA.HeaderEntry()
+                h.name = "Velocity range"
+                h.value = f"[{vel_max:.4f}, {vel_min:.4f}] (km/s)"
+                computed_entries.append(h)
+            # Skip adding velocity range if no rest frequency available
+
+        except Exception:
+            # Fallback if any calculation fails - skip adding N/A entries
+            pass
+    # If no frequency axis, skip adding N/A entries
+
+    # Calculate Stokes coverage
+    if "STOKES" in axes_dict:
+        try:
+            stokes_axis = axes_dict["STOKES"] + 1
+            nstokes = hdr[f"NAXIS{stokes_axis}"]
+            crval = hdr.get(f"CRVAL{stokes_axis}", 1)
+            cdelt = hdr.get(f"CDELT{stokes_axis}", 1)
+            crpix = hdr.get(f"CRPIX{stokes_axis}", 1)
+
+            # Calculate Stokes parameters present
+            stokes_values = []
+            for i in range(nstokes):
+                stokes_val = int(crval + (i + 1 - crpix) * cdelt)
+                if stokes_val == 1:
+                    stokes_values.append("I")
+                elif stokes_val == 2:
+                    stokes_values.append("Q")
+                elif stokes_val == 3:
+                    stokes_values.append("U")
+                elif stokes_val == 4:
+                    stokes_values.append("V")
+                elif stokes_val == -1:
+                    stokes_values.append("RR")
+                elif stokes_val == -2:
+                    stokes_values.append("LL")
+                elif stokes_val == -3:
+                    stokes_values.append("RL")
+                elif stokes_val == -4:
+                    stokes_values.append("LR")
+                elif stokes_val == -5:
+                    stokes_values.append("XX")
+                elif stokes_val == -6:
+                    stokes_values.append("YY")
+                elif stokes_val == -7:
+                    stokes_values.append("XY")
+                elif stokes_val == -8:
+                    stokes_values.append("YX")
+
+            if stokes_values:  # Only add if we have actual Stokes values
+                h = CARTA.HeaderEntry()
+                h.name = "Stokes coverage"
+                h.value = f"[{', '.join(stokes_values)}]"
+                computed_entries.append(h)
+
+        except Exception:
+            # Fallback if any calculation fails - skip adding N/A entries
+            pass
+    else:
+        # Check if there's a CTYPE that mentions STOKES
+        stokes_found = False
+        for i in range(1, hdr.get("NAXIS", 0) + 1):
+            ctype = hdr.get(f"CTYPE{i}", "")
+            if "STOKES" in ctype.upper():
+                stokes_found = True
+                break
+
+        if stokes_found:
+            h = CARTA.HeaderEntry()
+            h.name = "Stokes coverage"
+            h.value = "[I]"  # Default assumption
+            computed_entries.append(h)
+        # Skip adding Stokes coverage if not found
 
     return computed_entries
 
@@ -422,12 +578,13 @@ def get_file_info_extended(headers, file_name):
         if xtension in ["BINTABLE", "TABLE"]:
             continue
 
-        axes_dict = get_axes_dict(hdr)
-
         fex = CARTA.FileInfoExtended()
         fex.dimensions = hdr["NAXIS"]
         fex.width = hdr["NAXIS1"]
         fex.height = hdr["NAXIS2"]
+
+        axes_dict = get_axes_dict(hdr)
+
         if "FREQ" in axes_dict:
             n = axes_dict["FREQ"] + 1
             depth = hdr.get(f"NAXIS{n}", 1)
@@ -854,14 +1011,18 @@ def get_fits_dask_channels_chunks(wcs: WCS) -> tuple:
     tuple
         A tuple of chunk sizes for creating a Dask array from the FITS file.
     """
+    if len(wcs.wcs.ctype[0]) == 0 and wcs.wcs.naxis == 2:
+        chunks = (CHUNK_SIZE, CHUNK_SIZE)
+        return chunks
+
     # Get coordinate types from WCS
     ctypes = [ctype.upper() for ctype in wcs.wcs.ctype][::-1]
     chunks = []
     for ctype in ctypes:
         if ctype.startswith("RA"):
-            chunks.append("auto")
+            chunks.append(CHUNK_SIZE)
         elif ctype.startswith("DEC"):
-            chunks.append("auto")
+            chunks.append(CHUNK_SIZE)
         elif ctype.startswith("FREQ"):
             chunks.append(1)
         elif ctype.startswith("STOKES"):

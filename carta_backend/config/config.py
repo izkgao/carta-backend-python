@@ -14,3 +14,6 @@ TARGET_PARTIAL_REGION_TIME = 1000  # milliseconds
 # I/O
 N_JOBS = 4
 N_SEMAPHORE = 4
+
+# Dask
+CHUNK_SIZE = 1024

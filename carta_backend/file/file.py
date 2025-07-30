@@ -1175,8 +1175,8 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     # Get sizes
     array_axes_dict = get_array_axes_dict(header)
     sizes = {
-        "l": shape[array_axes_dict["x"]],
-        "m": shape[array_axes_dict["y"]],
+        "l": shape[array_axes_dict["x"]] if "x" in array_axes_dict else None,
+        "m": shape[array_axes_dict["y"]] if "y" in array_axes_dict else None,
         "frequency": shape[array_axes_dict["channel"]]
         if "channel" in array_axes_dict
         else None,
