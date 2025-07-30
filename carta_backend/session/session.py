@@ -389,8 +389,12 @@ class Session:
         # support_aips_beam = obj.support_aips_beam
 
         # Set parameters
-        directory = self.top_level_folder / directory
-        file_path = str(directory / file)
+        directory, _, _ = parse_frontend_directory(
+            directory,
+            self.starting_folder,
+            self.top_level_folder,
+        )
+        file_path = directory / file
 
         # Get file info
         file_info = await async_get_file_info(file_path)
@@ -448,9 +452,13 @@ class Session:
         # support_aips_beam = obj.support_aips_beam
 
         # Set parameters
-        directory = self.top_level_folder / obj.directory
+        directory, _, _ = parse_frontend_directory(
+            directory,
+            self.starting_folder,
+            self.top_level_folder,
+        )
         file_name = file
-        file_path = str(directory / file_name)
+        file_path = directory / file_name
         hdu_index = int(hdu) if len(hdu) > 0 else 0
         file_info = await async_get_file_info(file_path)
 
@@ -1873,28 +1881,41 @@ class Session:
         # filter_mode = obj.filter_mode
 
         # Set directory
-        if directory == "$BASE":
-            directory = self.starting_folder
-        else:
-            directory = self.top_level_folder / directory
+        directory, _directory, parent = parse_frontend_directory(
+            directory,
+            self.starting_folder,
+            self.top_level_folder,
+        )
 
         # Create response object
-        resp = CARTA.RegionListResponse()
-        resp.directory = str(directory.relative_to(self.top_level_folder))
-        parent = directory.parent
-        if parent == self.top_level_folder:
-            parent = ""
-        else:
-            parent = str(parent.relative_to(self.top_level_folder))
-        resp.parent = parent
+        response = CARTA.RegionListResponse()
+        response.directory = _directory
+        response.parent = parent
+
+        if directory == "virtual_root":
+            files = []
+            subdirectories = []
+            for partition in psutil.disk_partitions():
+                drive = Path(partition.device).drive.rstrip(":")
+                dir_info = CARTA.DirectoryInfo()
+                dir_info.name = drive
+                subdirectories.append(dir_info)
+
+            response.files.extend(files)
+            response.subdirectories.extend(subdirectories)
+            response.success = True
+            event_type = CARTA.EventType.REGION_LIST_RESPONSE
+            message = self.encode_message(event_type, request_id, response)
+            self.queue.put_nowait(message)
+            return None
 
         # Check if directory is accessible
         if not is_accessible(directory):
-            resp.success = False
+            response.success = False
             msg = f"Directory '{directory}' is not accessible"
-            resp.message = msg
+            response.message = msg
             event_type = CARTA.EventType.REGION_LIST_RESPONSE
-            message = self.encode_message(event_type, request_id, resp)
+            message = self.encode_message(event_type, request_id, response)
             self.queue.put_nowait(message)
             return None
 
@@ -1942,18 +1963,18 @@ class Session:
 
             files = await asyncio.gather(*files)
 
-            resp.files.extend(files)
-            resp.subdirectories.extend(subdirectories)
-            resp.success = True
+            response.files.extend(files)
+            response.subdirectories.extend(subdirectories)
+            response.success = True
 
         except Exception as e:
-            resp.success = False
-            resp.message = f"Error listing directory: {str(e)}"
+            response.success = False
+            response.message = f"Error listing directory: {str(e)}"
             clog.error(f"Error in do_FileListRequest: {str(e)}")
 
         # Send message
         event_type = CARTA.EventType.REGION_LIST_RESPONSE
-        message = self.encode_message(event_type, request_id, resp)
+        message = self.encode_message(event_type, request_id, response)
         self.queue.put_nowait(message)
         return None
 
@@ -1966,8 +1987,12 @@ class Session:
         file = obj.file
 
         # Set parameters
-        directory = self.top_level_folder / directory
-        file_path = str(directory / file)
+        directory, _, _ = parse_frontend_directory(
+            directory,
+            self.starting_folder,
+            self.top_level_folder,
+        )
+        file_path = directory / file
 
         # Get file info
         file_type = get_region_file_type(file_path)
@@ -2005,8 +2030,12 @@ class Session:
         # contents = obj.contents
 
         # Set parameters
-        directory = self.top_level_folder / directory
-        file_path = str(directory / file)
+        directory, _, _ = parse_frontend_directory(
+            directory,
+            self.starting_folder,
+            self.top_level_folder,
+        )
+        file_path = directory / file
 
         # Create response object
         resp = CARTA.ImportRegionAck()
