@@ -11,7 +11,7 @@ import psutil
 from astropy.io import fits
 from dask.distributed import Client
 from numba import threading_layer
-from xarray import open_zarr
+from zarr.api.asynchronous import open_group
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import (
@@ -22,14 +22,12 @@ from carta_backend.config.config import (
     TARGET_PARTIAL_CURSOR_TIME,
     TARGET_PARTIAL_REGION_TIME,
 )
-from carta_backend.file import (
-    FileManager,
-    get_directory_info,
-    get_file_info_extended,
-    get_header_from_xradio,
-)
+from carta_backend.file.file import FileManager
 from carta_backend.file.utils import (
     async_get_file_info,
+    get_directory_info,
+    get_file_info_extended,
+    get_header_from_zarr,
     get_region_file_type,
     is_accessible,
     is_casa,
@@ -405,9 +403,9 @@ class Session:
         # Read headers
         if file_info.type == CARTA.FileType.CASA:
             # Currently zarr
-            xarr = open_zarr(file_path)
-            hdr = await get_header_from_xradio(xarr, self.client)
-            xarr.close()
+            zgrp = await open_group(file_path, mode="r")
+            hdr = await get_header_from_zarr(zgrp)
+            del zgrp
             fex_dict = get_file_info_extended([hdr], file)
             for k, v in fex_dict.items():
                 response.file_info_extended[k].CopyFrom(v)

@@ -12,7 +12,8 @@ import psutil
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from dask import delayed
-from xarray import Dataset, open_zarr
+from zarr.api.asynchronous import open_group
+from zarr.core.array import AsyncArray
 
 from carta_backend import proto as CARTA
 from carta_backend.config.config import TILE_SHAPE
@@ -21,10 +22,10 @@ from carta_backend.file.utils import (
     async_read_zarr_slice,
     block_reduce_numba,
     compute_slices,
-    get_axes_dict,
+    get_array_axes_dict,
     get_file_type,
     get_fits_dask_channels_chunks,
-    get_header_from_xradio,
+    get_header_from_zarr,
     load_data,
     mmap_dask_array,
 )
@@ -52,7 +53,7 @@ class FileData:
     # File path
     file_path: Path
     # for Dask
-    data: da.Array | Dataset
+    data: da.Array | AsyncArray
     # for creating memmap
     memmap_info: Dict[str, Any] | None
     # for FITS image channels
@@ -81,8 +82,8 @@ class FileData:
     spat_req: Dict[str, Dict[str, int | None]]
     # Cursor coordinates
     cursor_coords: List[int | None]
-    # Dict of axes with xradio style keys
-    axes_dict: Dict[str, int] | None
+    # D
+    array_axes_dict: Dict[str, int] | None
     # Current channel
     channel: int = 0
     # Current stokes
@@ -114,7 +115,7 @@ class FileManager:
         if file_type == CARTA.FileType.FITS:
             filedata = get_fits_FileData(file_id, file_path, hdu_index)
         elif file_type == CARTA.FileType.CASA:
-            filedata = await get_zarr_FileData(file_id, file_path, self.client)
+            filedata = await get_zarr_FileData(file_id, file_path)
 
         self.files[file_id] = filedata
 
@@ -1175,17 +1176,19 @@ def get_fits_FileData(file_id, file_path, hdu_index):
         wcs = WCS(header)
 
     # Get sizes
-    axes_dict = get_axes_dict(header)
+    array_axes_dict = get_array_axes_dict(header)
     sizes = {
-        "l": shape[-axes_dict["RA"] - 1],
-        "m": shape[-axes_dict["DEC"] - 1],
-        "frequency": shape[-axes_dict["FREQ"] - 1]
-        if "FREQ" in axes_dict
+        "l": shape[array_axes_dict["x"]],
+        "m": shape[array_axes_dict["y"]],
+        "frequency": shape[array_axes_dict["channel"]]
+        if array_axes_dict["channel"] is not None
         else None,
-        "stokes": shape[-axes_dict["STOKES"] - 1]
-        if "STOKES" in axes_dict
+        "stokes": shape[array_axes_dict["stokes"]]
+        if array_axes_dict["stokes"] is not None
         else None,
-        "time": shape[-axes_dict["TIME"] - 1] if "TIME" in axes_dict else None,
+        "time": shape[array_axes_dict["time"]]
+        if array_axes_dict["time"] is not None
+        else None,
     }
 
     # Create dask array
@@ -1223,7 +1226,7 @@ def get_fits_FileData(file_id, file_path, hdu_index):
     data_size_mib = data.nbytes / 1024**2
     frame_size_mib = data_size_mib / np.prod(data.shape[:-2])
 
-    clog.debug(f"File ID '{file_id}' opened successfully")
+    clog.debug(f"File ID {file_id} opened successfully")
     clog.debug(f"File dimensions: {shape}, chunking: {str(data.chunksize)}")
 
     memmap_info = {
@@ -1255,47 +1258,44 @@ def get_fits_FileData(file_id, file_path, hdu_index):
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
         cursor_coords=[None, None, None],
-        axes_dict=get_axes_dict(header),
+        array_axes_dict=array_axes_dict,
         use_dask=False,
     )
     return filedata
 
 
-async def get_zarr_FileData(file_id, file_path, client=None):
-    # Read zarr
-    data = open_zarr(file_path, chunks="auto")
+async def get_zarr_FileData(file_id, file_path):
+    # Get information
+    zgrp = await open_group(file_path)
+    header = await get_header_from_zarr(zgrp)
 
-    # Get header
-    header = await get_header_from_xradio(data, client)
-    img_shape = [data.sizes["m"], data.sizes["l"]]
-
-    # Get sizes
     sizes = {
-        "l": data.sizes["l"],
-        "m": data.sizes["m"],
-        "frequency": data.sizes.get("frequency", None),
-        "stokes": data.sizes.get("polarization", None),
-        "time": data.sizes.get("time", None),
+        "l": header["NAXIS1"],
+        "m": header["NAXIS2"],
+        "frequency": header["NAXIS4"],
+        "stokes": header["NAXIS3"],
+        "time": header["NAXIS5"],
     }
+
+    sky = await zgrp.get("SKY")
+    chunks = sky.chunks
+    itemsize = np.dtype(sky.dtype).itemsize
+    data_size_mib = sky.nbytes / 1024**2
+    frame_size_mib = itemsize * sizes["l"] * sizes["m"] / 1024**2
+    img_shape = [sizes["m"], sizes["l"]]
+    array_axes_dict = get_array_axes_dict(header)
 
     # Log file information in separate parts to avoid
     # formatting conflicts
-    clog.debug(f"File ID '{file_id}' opened successfully")
+    clog.debug(f"File ID {file_id} opened successfully.")
     clog.debug(
-        f"File dimensions: time={data.sizes.get('time', 'N/A')}, "
-        f"frequency={data.sizes.get('frequency', 'N/A')}, "
-        f"polarization={data.sizes.get('polarization', 'N/A')}, "
-        f"l={data.sizes.get('l', 'N/A')}, "
-        f"m={data.sizes.get('m', 'N/A')}"
+        f"File dimensions: time={sizes['time']}, "
+        f"frequency={sizes['frequency']}, "
+        f"polarization={sizes['stokes']}, "
+        f"l={sizes['l']}, "
+        f"m={sizes['m']}"
     )
-    clog.debug(f"Chunking: {str(data.SKY.data.chunksize)}")
-
-    data_size_mib = data.SKY.nbytes / 1024**2
-    factor = 1
-    for k, v in data.SKY.sizes.items():
-        if k not in ["l", "m"]:
-            factor *= v
-    frame_size_mib = data_size_mib / factor
+    clog.debug(f"Chunking: {str(chunks)}")
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FITSFixedWarning)
@@ -1303,8 +1303,8 @@ async def get_zarr_FileData(file_id, file_path, client=None):
 
     filedata = FileData(
         file_path=Path(file_path),
-        data=data,
-        dask_channels=data,
+        data=sky,
+        dask_channels=sky,
         memmap_info=None,
         header=header,
         wcs=wcs,
@@ -1321,7 +1321,7 @@ async def get_zarr_FileData(file_id, file_path, client=None):
             "y": {"start": 0, "end": None, "mip": 1, "width": 0},
         },
         cursor_coords=[None, None, None],
-        axes_dict=get_axes_dict(header),
+        array_axes_dict=array_axes_dict,
         use_dask=False,
     )
     return filedata

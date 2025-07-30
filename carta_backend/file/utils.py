@@ -11,10 +11,11 @@ import numba as nb
 import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
+from astropy.time import Time
 from astropy.wcs import WCS
 from dask import delayed
 from numcodecs import get_codec
-from xarray import Dataset
+from zarr.core.array import AsyncArray
 
 from carta_backend import proto as CARTA
 from carta_backend.log import logger
@@ -166,6 +167,29 @@ def get_axes_dict(hdr):
     return axes_dict
 
 
+def get_array_axes_dict(hdr):
+    axes_dict = {
+        "x": None,
+        "y": None,
+        "channel": None,
+        "stokes": None,
+        "time": None,
+    }
+    naxis = hdr["NAXIS"]
+    for i in range(1, naxis + 1):
+        if hdr[f"CTYPE{i}"].startswith("RA"):
+            axes_dict["x"] = naxis - i - 1
+        elif hdr[f"CTYPE{i}"].startswith("DEC"):
+            axes_dict["y"] = naxis - i - 1
+        elif hdr[f"CTYPE{i}"].startswith("STOKES"):
+            axes_dict["stokes"] = naxis - i - 1
+        elif hdr[f"CTYPE{i}"].startswith("FREQ"):
+            axes_dict["channel"] = naxis - i - 1
+        elif hdr[f"CTYPE{i}"].startswith("TIME"):
+            axes_dict["time"] = naxis - i - 1
+    return axes_dict
+
+
 def get_header_entries(hdr):
     header_entries = []
 
@@ -197,6 +221,8 @@ def get_computed_entries(hdr, hdu_index, file_name):
     computed_entries = []
 
     axes_dict = get_axes_dict(hdr)
+    x_num = axes_dict["RA"] + 1
+    y_num = axes_dict["DEC"] + 1
 
     h = CARTA.HeaderEntry()
     h.name = "Name"
@@ -257,13 +283,15 @@ def get_computed_entries(hdr, hdu_index, file_name):
 
     h = CARTA.HeaderEntry()
     h.name = "Projection"
-    h.value = hdr["CTYPE1"].split("-")[-1].strip()
+    h.value = hdr[f"CTYPE{x_num}"].split("-")[-1].strip()
     computed_entries.append(h)
 
     try:
         h = CARTA.HeaderEntry()
         h.name = "Image reference pixels"
-        h.value = f"[{int(hdr['CRPIX1'])}, {int(hdr['CRPIX2'])}]"
+        hx = int(hdr[f"CRPIX{x_num}"])
+        hy = int(hdr[f"CRPIX{y_num}"])
+        h.value = f"[{hx}, {hy}]"
         computed_entries.append(h)
     except KeyError:
         pass
@@ -271,7 +299,9 @@ def get_computed_entries(hdr, hdu_index, file_name):
     try:
         h = CARTA.HeaderEntry()
         h.name = "Image reference coords"
-        coord = SkyCoord(ra=hdr["CRVAL1"], dec=hdr["CRVAL2"], unit="deg")
+        coord = SkyCoord(
+            ra=hdr[f"CRVAL{x_num}"], dec=hdr[f"CRVAL{y_num}"], unit="deg"
+        )
         coords = coord.to_string("hmsdms", sep=":", precision=4).split()
         h.value = f"[{coords[0]}, {coords[1]}]"
         computed_entries.append(h)
@@ -281,7 +311,9 @@ def get_computed_entries(hdr, hdu_index, file_name):
     try:
         h = CARTA.HeaderEntry()
         h.name = "Image ref coords (deg)"
-        h.value = f"[{hdr['CRVAL1']:.4f} deg, {hdr['CRVAL2']:.4f} deg]"
+        hx = hdr[f"CRVAL{x_num}"]
+        hy = hdr[f"CRVAL{y_num}"]
+        h.value = f"[{hx:.4f} deg, {hy:.4f} deg]"
         computed_entries.append(h)
     except KeyError:
         pass
@@ -289,7 +321,9 @@ def get_computed_entries(hdr, hdu_index, file_name):
     try:
         h = CARTA.HeaderEntry()
         h.name = "Pixel increment"
-        h.value = f'{hdr["CDELT1"] * 3600}", {hdr["CDELT2"] * 3600}"'
+        hx = hdr[f"CDELT{x_num}"] * 3600
+        hy = hdr[f"CDELT{y_num}"] * 3600
+        h.value = f'{hx}", {hy}"'
         computed_entries.append(h)
     except KeyError:
         pass
@@ -666,6 +700,147 @@ def get_header_from_xradio_old(xarr):
     return hdr
 
 
+async def get_header_from_zarr(zgrp):
+    # Get arrays
+    ll = await zgrp.get("l")
+    mm = await zgrp.get("m")
+    freq = await zgrp.get("frequency")
+    pol = await zgrp.get("polarization")
+    time = await zgrp.get("time")
+    sky = await zgrp.get("SKY")
+    beam = await zgrp.get("BEAM")
+
+    if "direction" in zgrp.attrs:
+        wcs_dict = zgrp.attrs["direction"]
+    else:
+        wcs_dict = sky.attrs["direction_info"]
+        wcs_dict.update(
+            {
+                "latpole": {"data": wcs_dict["latpole"]["value"]},
+                "lonpole": {"data": wcs_dict["lonpole"]["value"]},
+                "pc": {"_value": wcs_dict["pc"]},
+                "projection": wcs_dict["projection"],
+            }
+        )
+    sky_attrs = wcs_dict["reference"]["attrs"]
+    freq_ref_attrs = freq.attrs["reference_value"]["attrs"]
+
+    bitpix_mapping = {
+        "uint8": 8,
+        "int16": 16,
+        "int32": 32,
+        "int64": 64,
+        "float32": -32,
+        "float64": -64,
+    }
+
+    naxis = 5
+
+    hdr = {"SIMPLE": True}
+    hdr["BITPIX"] = bitpix_mapping[sky.dtype.name]
+    hdr["NAXIS"] = naxis
+
+    for i, v in enumerate([ll, mm, pol, freq, time]):
+        hdr[f"NAXIS{i + 1}"] = v.size
+
+    hdr["BSCALE"] = 1.0
+    hdr["BZERO"] = 0.0
+    bunit = sky.attrs["units"]
+    hdr["BUNIT"] = bunit[0] if isinstance(bunit, list) else bunit
+    hdr["EQUINOX"] = float(sky_attrs.get("equinox", "J2000.0")[1:])
+    hdr["RADESYS"] = sky_attrs["frame"].upper()
+    hdr["LONPOLE"] = np.rad2deg(wcs_dict["lonpole"]["data"])
+    hdr["LATPOLE"] = np.rad2deg(wcs_dict["latpole"]["data"])
+
+    pc = np.identity(naxis)
+    _pc = np.array(wcs_dict["pc"]["_value"])
+    pc[:2, :2] = _pc[::-1, ::-1]
+    for i in range(naxis):
+        for j in range(naxis):
+            hdr[f"PC{i + 1}_{j + 1}"] = pc[i, j]
+
+    ctype = [
+        f"RA---{wcs_dict['projection']}",
+        f"DEC--{wcs_dict['projection']}",
+        "STOKES",
+        "FREQ",
+        "TIME",
+    ]
+    crval = [
+        np.rad2deg(wcs_dict["reference"]["data"][0]),
+        np.rad2deg(wcs_dict["reference"]["data"][1]),
+        1.0,
+        freq.attrs["reference_value"]["data"],
+        1.0,
+    ]
+    cdelt = [
+        np.rad2deg(await ll.getitem(1) - await ll.getitem(0)),
+        np.rad2deg(await mm.getitem(1) - await mm.getitem(0)),
+        1.0,
+        await freq.getitem(1) - await freq.getitem(0),
+        1.0,
+    ]
+    crpix = [
+        np.where(await ll.getitem(...) == 0)[0][0] + 1,
+        np.where(await mm.getitem(...) == 0)[0][0] + 1,
+        1.0,
+        1.0,
+        1.0,
+    ]
+    cunit = [
+        "deg",
+        "deg",
+        "",
+        freq_ref_attrs["units"][0],
+        time.attrs["units"][0],
+    ]
+
+    for i in range(naxis):
+        hdr[f"CTYPE{i + 1}"] = ctype[i]
+        hdr[f"CRVAL{i + 1}"] = crval[i]
+        hdr[f"CDELT{i + 1}"] = cdelt[i]
+        hdr[f"CRPIX{i + 1}"] = crpix[i]
+        hdr[f"CUNIT{i + 1}"] = cunit[i]
+
+    hdr["RESTFRQ"] = freq.attrs["rest_frequency"]["data"]
+    hdr["SPECSYS"] = freq_ref_attrs["observer"].upper()
+
+    if "obsdate" in sky.attrs:
+        obsdate = sky.attrs["obsdate"]["data"]
+        tformat = sky.attrs["obsdate"]["attrs"]["format"].lower()
+        tscale = sky.attrs["obsdate"]["attrs"]["scale"].upper()
+        telescope = sky.attrs["telescope"]["name"]
+
+    else:
+        obsdate = sky.attrs["observation_date"]["data"]
+        tformat = sky.attrs["observation_date"]["attrs"]["format"].lower()
+        tscale = sky.attrs["observation_date"]["attrs"]["scale"].upper()
+        telescope = sky.attrs["telescope_info"]["name"]
+
+    hdr["DATE-OBS"] = Time(obsdate, format=tformat).isot
+    hdr["MJD-OBS"] = obsdate
+    hdr["TIMESYS"] = tscale
+    hdr["TELESCOP"] = telescope
+
+    if beam is not None:
+        beam = await beam.getitem((0, 0, 0))
+        bmaj, bmin, bpa = np.rad2deg(beam)
+    else:
+        beam = sky.attrs["user"]
+        bmaj = beam["bmaj"]
+        bmin = beam["bmin"]
+        bpa = beam["bpa"]
+
+    hdr["BMAJ"] = bmaj
+    hdr["BMIN"] = bmin
+    hdr["BPA"] = bpa
+
+    cdelt = np.array([hdr["CDELT1"], hdr["CDELT2"]])
+    pc = np.array([[hdr["PC1_1"], hdr["PC1_2"]], [hdr["PC2_1"], hdr["PC2_2"]]])
+    hdr["PIX_AREA"] = abs(np.linalg.det(np.diag(cdelt) @ pc))
+    return fits.Header(hdr)
+
+
 def get_fits_dask_channels_chunks(wcs: WCS) -> tuple:
     """
     Get a tuple of chunk sizes for creating a Dask array from a FITS file.
@@ -816,6 +991,17 @@ def load_xradio_data(
     return data
 
 
+async def load_zarr_data(
+    data: AsyncArray,
+    x=None,
+    y=None,
+    channel=None,
+    stokes=None,
+    dtype=None,
+):
+    pass
+
+
 def load_data(
     data,
     x=None,
@@ -838,7 +1024,7 @@ def load_data(
             dtype=dtype,
         )
     # Xarray Dataset from Xradio
-    elif isinstance(data, Dataset):
+    elif isinstance(data, AsyncArray):
         return load_xradio_data(
             ds=data,
             x=x,
