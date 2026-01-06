@@ -934,8 +934,8 @@ async def get_header_from_zarr(zgrp):
         "deg",
         "deg",
         "",
-        freq_ref["attrs"]["units"][0],
-        time.attrs["units"][0],
+        freq_ref["attrs"]["units"],
+        time.attrs["units"],
     ]
 
     for i in range(naxis):
