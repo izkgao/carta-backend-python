@@ -85,9 +85,7 @@ def is_accessible(path: Union[str, Path]) -> bool:
         return False
 
 
-def get_file_info(
-    path: str | Path, file_type: int | None = None
-) -> CARTA.FileInfo:
+def get_file_info(path: str | Path, file_type: int | None = None) -> CARTA.FileInfo:
     file_info = CARTA.FileInfo()
     file_info.name = os.path.basename(path)
 
@@ -310,9 +308,7 @@ def get_computed_entries(hdr, hdu_index, file_name):
     if x_num is not None and y_num is not None:
         h = CARTA.HeaderEntry()
         h.name = "Image reference coords"
-        coord = SkyCoord(
-            ra=hdr[f"CRVAL{x_num}"], dec=hdr[f"CRVAL{y_num}"], unit="deg"
-        )
+        coord = SkyCoord(ra=hdr[f"CRVAL{x_num}"], dec=hdr[f"CRVAL{y_num}"], unit="deg")
         coords = coord.to_string("hmsdms", sep=":", precision=4).split()
         h.value = f"[{coords[0]}, {coords[1]}]"
         computed_entries.append(h)
@@ -412,9 +408,7 @@ def get_computed_entries(hdr, hdu_index, file_name):
         )
 
         # Convert to world coordinates
-        corners_world = wcs.pixel_to_world(
-            corners_pix[:, 1], corners_pix[:, 0]
-        )
+        corners_world = wcs.pixel_to_world(corners_pix[:, 1], corners_pix[:, 0])
         corners_world = corners_world.to_string("hmsdms", sep=":", precision=3)
 
         # Parse RA and DEC coordinates with validation
@@ -628,9 +622,7 @@ async def get_header_from_xradio(xarr, client=None):
     elif hasattr(xarr["SKY"], "direction_info"):
         hdr = get_header_from_xradio_old(xarr)
     else:
-        raise ValueError(
-            "Could not find direction information in Xradio dataset"
-        )
+        raise ValueError("Could not find direction information in Xradio dataset")
     return hdr
 
 
@@ -738,11 +730,7 @@ async def get_header_from_xradio_new(xarr, client=None):
             xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data
         )
     else:
-        beam = (
-            xarr["BEAM"]
-            .isel(time=0, frequency=0, polarization=0)
-            .data.compute()
-        )
+        beam = xarr["BEAM"].isel(time=0, frequency=0, polarization=0).data.compute()
     bmaj, bmin, bpa = np.rad2deg(beam)
     hdr["BMAJ"] = bmaj
     hdr["BMIN"] = bmin
@@ -875,7 +863,10 @@ async def get_header_from_zarr(zgrp):
             }
         )
     sky_attrs = wcs_dict["reference"]["attrs"]
-    freq_ref_attrs = freq.attrs["reference_value"]["attrs"]
+    if "reference_value" in freq.attrs:
+        freq_ref = freq.attrs["reference_value"]
+    else:
+        freq_ref = freq.attrs["reference_frequency"]
 
     bitpix_mapping = {
         "uint8": 8,
@@ -922,7 +913,7 @@ async def get_header_from_zarr(zgrp):
         np.rad2deg(wcs_dict["reference"]["data"][0]),
         np.rad2deg(wcs_dict["reference"]["data"][1]),
         1.0,
-        freq.attrs["reference_value"]["data"],
+        freq_ref["data"],
         1.0,
     ]
     cdelt = [
@@ -943,7 +934,7 @@ async def get_header_from_zarr(zgrp):
         "deg",
         "deg",
         "",
-        freq_ref_attrs["units"][0],
+        freq_ref["attrs"]["units"][0],
         time.attrs["units"][0],
     ]
 
@@ -955,7 +946,7 @@ async def get_header_from_zarr(zgrp):
         hdr[f"CUNIT{i + 1}"] = cunit[i]
 
     hdr["RESTFRQ"] = freq.attrs["rest_frequency"]["data"]
-    hdr["SPECSYS"] = freq_ref_attrs["observer"].upper()
+    hdr["SPECSYS"] = freq_ref["attrs"]["observer"].upper()
 
     if "obsdate" in sky.attrs:
         obsdate = sky.attrs["obsdate"]["data"]
@@ -1109,9 +1100,7 @@ def load_fits_data(
     return result
 
 
-async def async_load_xradio_data(
-    data, channel=None, stokes=None, time=0, client=None
-):
+async def async_load_xradio_data(data, channel=None, stokes=None, time=0, client=None):
     if channel is None:
         channel = slice(channel)
     if stokes is None:
@@ -1122,9 +1111,7 @@ async def async_load_xradio_data(
     return data.data
 
 
-def load_xradio_data(
-    ds, x=None, y=None, channel=None, stokes=None, time=0, dtype=None
-):
+def load_xradio_data(ds, x=None, y=None, channel=None, stokes=None, time=0, dtype=None):
     if channel is None:
         channel = slice(channel)
     if stokes is None:
@@ -1236,9 +1223,7 @@ async def async_load_data(
         result = data[slices]
 
     if isinstance(result, np.memmap):
-        result = await asyncio.to_thread(
-            np.array, result, dtype=dtype, copy=True
-        )
+        result = await asyncio.to_thread(np.array, result, dtype=dtype, copy=True)
     elif dtype is not None:
         result = result.astype(dtype, copy=False)
     return result
@@ -1357,9 +1342,7 @@ def get_chunk_read_plan(
             chunk_idx = idx // chunk_size
             offset_in_chunk = idx % chunk_size
             chunk_ranges.append([chunk_idx])
-            slice_ranges.append(
-                {chunk_idx: offset_in_chunk}
-            )  # scalar, not a slice
+            slice_ranges.append({chunk_idx: offset_in_chunk})  # scalar, not a slice
             output_shape.append(1)
         elif isinstance(idx, slice):
             start = 0 if idx.start is None else idx.start
@@ -1405,9 +1388,7 @@ def get_chunk_read_plan(
                 chunk_slice.append(s)
 
                 start = chunk_idx * chunk_size + s.start
-                full_start = (
-                    0 if indices[axis].start is None else indices[axis].start
-                )
+                full_start = 0 if indices[axis].start is None else indices[axis].start
                 global_slice.append(
                     slice(
                         start - full_start,
@@ -1584,11 +1565,7 @@ async def async_read_zarr_slice(
     if y is None:
         y = slice(None)
 
-    if (
-        isinstance(channel, int)
-        and isinstance(stokes, int)
-        and isinstance(time, int)
-    ):
+    if isinstance(channel, int) and isinstance(stokes, int) and isinstance(time, int):
         return await async_read_zarr_channel(
             file_path=file_path,
             channel=channel,
@@ -1807,9 +1784,7 @@ async def async_read_zarr_channel(
         data_piece = chunk_data[channel_chunk_slice]
         result[channel_global_slice] = data_piece
 
-    func = (
-        decomp_read_and_insert if comp_config is not None else read_and_insert
-    )
+    func = decomp_read_and_insert if comp_config is not None else read_and_insert
 
     await asyncio.gather(*[func(plan) for plan in plans])
 
@@ -1845,9 +1820,7 @@ def mmap_load_chunk(filename, shape, dtype, offset, sl):
         View into memory map created by indexing with :code:`sl`,
         or NumPy ndarray in case no view can be created using :code:`sl`.
     """
-    data = np.memmap(
-        filename, mode="r", shape=shape, dtype=dtype, offset=offset
-    )
+    data = np.memmap(filename, mode="r", shape=shape, dtype=dtype, offset=offset)
     return data[sl]
 
 
@@ -1896,9 +1869,7 @@ def mmap_dask_array_old(filename, shape, dtype, offset=0, chunks="auto"):
             blocks_in_dim = []
             for idx in chunk_indices[dimension]:
                 new_indices = indices + (idx,)
-                blocks_in_dim.append(
-                    create_nested_blocks(dimension + 1, new_indices)
-                )
+                blocks_in_dim.append(create_nested_blocks(dimension + 1, new_indices))
             return blocks_in_dim
 
     # Create the nested structure of blocks
@@ -1963,9 +1934,7 @@ def mmap_dask_array_old_v3(filename, shape, dtype, offset=0, chunks="auto"):
     )
 
     # Pre-compute all slice information
-    chunk_grid_shape = tuple(
-        len(chunks_dim) for chunks_dim in normalized_chunks
-    )
+    chunk_grid_shape = tuple(len(chunks_dim) for chunks_dim in normalized_chunks)
     slice_array = np.empty(chunk_grid_shape + (len(shape), 2), dtype=int)
 
     for block_id in np.ndindex(chunk_grid_shape):
@@ -1999,9 +1968,7 @@ def _load_chunk_from_slices(slice_specs, filename, shape, dtype, offset):
     slice_specs = np.squeeze(slice_specs)[()]
     slices = tuple(slice(int(s[0]), int(s[1])) for s in slice_specs)
 
-    memmap_data = np.memmap(
-        filename, mode="r", shape=shape, dtype=dtype, offset=offset
-    )
+    memmap_data = np.memmap(filename, mode="r", shape=shape, dtype=dtype, offset=offset)
     return memmap_data[slices]
 
 
@@ -2041,14 +2008,11 @@ def mmap_dask_array(filename, shape, dtype, offset=0, chunks="auto"):
     )
 
     # Pre-compute all slice information
-    chunk_grid_shape = tuple(
-        len(chunks_dim) for chunks_dim in normalized_chunks
-    )
+    chunk_grid_shape = tuple(len(chunks_dim) for chunks_dim in normalized_chunks)
 
     # Pre-compute cumulative sums
     cumsum_chunks = [
-        np.concatenate(([0], np.cumsum(chunks_dim)))
-        for chunks_dim in normalized_chunks
+        np.concatenate(([0], np.cumsum(chunks_dim))) for chunks_dim in normalized_chunks
     ]
 
     # Create index arrays for each dimension
